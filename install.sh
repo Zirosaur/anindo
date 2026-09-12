@@ -50,7 +50,7 @@ if [ ! -f "$SCRIPT_SRC" ]; then
     # Fallback to remote raw github if installed via curl | sh
     SCRIPT_SRC="$TARGET_DIR/anindo"
     printf "${C_BLUE}==>${C_RESET} Mengunduh anindo...\n"
-    curl -sL https://raw.githubusercontent.com/ziro/anindo/main/anindo -o "$SCRIPT_SRC"
+    curl -sL https://raw.githubusercontent.com/Zirosaur/anindo/main/anindo -o "$SCRIPT_SRC"
 else
     cp "$SCRIPT_SRC" "$TARGET_DIR/anindo"
 fi

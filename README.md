@@ -51,9 +51,14 @@ Pastikan peralatan berikut sudah terpasang di sistemmu:
 
 ## 🚀 Instalasi
 
-### Cara 1: Clone Repositori
+### Cara 1: Satu Baris Perintah (Rekomendasi)
 ```bash
-git clone https://github.com/<username>/anindo.git
+curl -sL https://raw.githubusercontent.com/Zirosaur/anindo/main/install.sh | bash
+```
+
+### Cara 2: Clone Repositori
+```bash
+git clone https://github.com/Zirosaur/anindo.git
 cd anindo
 ./install.sh
 ```
