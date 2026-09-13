@@ -142,6 +142,15 @@ def test_code_integrity():
     dash_fn = mod.get("render_player_dashboard")
     assert callable(dash_fn), "render_player_dashboard is not callable"
 
+    # Check clear_screen & format_episode_display_title
+    clr_fn = mod.get("clear_screen")
+    assert callable(clr_fn), "clear_screen is not callable"
+
+    fmt_ep_fn = mod.get("format_episode_display_title")
+    assert callable(fmt_ep_fn), "format_episode_display_title is not callable"
+    assert fmt_ep_fn("Mushoku Tensei Season 3", "Mushoku Tensei Season 3 Episode 1") == "Mushoku Tensei Season 3 Episode 1"
+    assert fmt_ep_fn("Initial D", "Episode 1") == "Initial D - Episode 1"
+
     print("  Code integrity, player dashboard & XDG watch state verified: 0 undefined globals")
 
 run_check("Code Integrity & Watch State Helpers", test_code_integrity)

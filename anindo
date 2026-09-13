@@ -169,6 +169,22 @@ def log_warn(msg):
 def log_err(msg):
     print(f"{C_RED}[anindo]{C_RESET} {msg}", file=sys.stderr)
 
+def clear_screen():
+    """Clear terminal screen and reset cursor position cleanly."""
+    if sys.stdout.isatty():
+        sys.stdout.write("\033[H\033[2J")
+        sys.stdout.flush()
+
+def format_episode_display_title(anime_title: str, ep_title: str) -> str:
+    """Produce a clean, non-redundant display title for an episode without stuttering."""
+    a = anime_title.strip()
+    e = ep_title.strip()
+    if a.lower() == e.lower():
+        return a
+    if a.lower() in e.lower():
+        return e
+    return f"{a} - {e}"
+
 # ==============================================================================
 # 1. RESILIENT DOM TOKENIZER
 # ==============================================================================
@@ -1038,7 +1054,7 @@ def pad_box_line(content: str, width: int = 70) -> str:
     pad = max(0, width - 4 - dw)
     return f"{C_CYAN}│{C_RESET}  {content}" + " " * pad + f"{C_CYAN}│{C_RESET}"
 
-def render_player_dashboard(title: str, quality_label: str = ""):
+def render_player_dashboard(title: str, quality_label: str = "", start_pos: float = 0):
     """Render an elegant, modern player dashboard with full keyboard control guide."""
     cols = shutil.get_terminal_size((80, 24)).columns
     width = min(70, max(60, cols - 2))
@@ -1046,7 +1062,13 @@ def render_player_dashboard(title: str, quality_label: str = ""):
     if str_display_width(clean_title) > width - 10:
         clean_title = clean_title[:width - 13] + "..."
 
-    meta = f"Kualitas: {quality_label}" if quality_label else ""
+    meta_parts = []
+    if quality_label:
+        meta_parts.append(f"Kualitas: {quality_label}")
+    if start_pos and start_pos > 5:
+        meta_parts.append(f"▶ Lanjut: {format_time(start_pos)}")
+
+    meta = "  •  ".join(meta_parts)
     if str_display_width(meta) > width - 10:
         meta = meta[:width - 13] + "..."
 
@@ -1151,7 +1173,9 @@ def play_video(url, title, quality_label="", referer=None, is_hls=False, start_p
 
     # Render modern, elegant terminal player dashboard
     if sys.stdout.isatty():
-        render_player_dashboard(title, quality_label)
+        if os.environ.get("ANINDO_DEBUG") != "1":
+            clear_screen()
+        render_player_dashboard(title, quality_label, start_pos=start_pos)
 
     # Temporary input.conf for in-player hotkeys & on-screen OSD cheat-sheet
     input_conf_file = Path(f"/tmp/anindo-input-{os.getpid()}.conf")
@@ -1213,7 +1237,6 @@ def play_video(url, title, quality_label="", referer=None, is_hls=False, start_p
 
     if start_pos and start_pos > 5:
         mpv_cmd.append(f"--start={int(start_pos)}")
-        log_info(f"Melanjutkan dari menit {format_time(start_pos)}...")
 
     if referer:
         mpv_cmd.append(f"--referrer={referer}")
@@ -2120,7 +2143,7 @@ def main():
                     log_warn(f"Server {s_name} ({s_qual}) tidak tersedia, mencoba alternatif...")
                     continue
 
-                full_title = f"{clean_disp_title} - {ep['title']}"
+                full_title = format_episode_display_title(clean_disp_title, ep['title'])
                 try:
                     download_video(stream_url, full_title, s_qual, referer=ref, is_hls=is_hls)
                     save_history(
@@ -2150,7 +2173,7 @@ def main():
                         log_info(f"Mencoba server cadangan: {s_name} ({s_qual})...")
                         stream_url, ref = cand["resolve_fn"]()
                         if stream_url:
-                            full_title = f"{clean_disp_title} - {ep['title']} (Fallback)"
+                            full_title = f"{format_episode_display_title(clean_disp_title, ep['title'])} (Fallback)"
                             try:
                                 download_video(stream_url, full_title, s_qual, referer=ref, is_hls=is_hls)
                                 save_history(
@@ -2226,7 +2249,7 @@ def main():
                 log_warn(f"Server {s_name} ({s_qual}) tidak tersedia, mencoba alternatif...")
                 continue
 
-            full_title = f"{clean_disp_title} - {ep['title']}"
+            full_title = format_episode_display_title(clean_disp_title, ep['title'])
             ok, pb_state = play_video(stream_url, full_title, f"{s_qual} - {s_name}", referer=ref, is_hls=is_hls, start_pos=start_pos_for_ep)
             if ok:
                 last_playback_info = pb_state
@@ -2260,7 +2283,7 @@ def main():
                     log_info(f"Mencoba server cadangan lintas penyedia: {s_name} ({s_qual})...")
                     stream_url, ref = cand["resolve_fn"]()
                     if stream_url:
-                        full_title = f"{clean_disp_title} - {ep['title']} (Fallback)"
+                        full_title = f"{format_episode_display_title(clean_disp_title, ep['title'])} (Fallback)"
                         ok, pb_state = play_video(stream_url, full_title, f"{s_qual} - {s_name}", referer=ref, is_hls=is_hls, start_pos=start_pos_for_ep)
                         if ok:
                             last_playback_info = pb_state
@@ -2291,7 +2314,6 @@ def main():
         if ret_code == 2:  # 'N' or '>' pressed inside MPV
             if has_next:
                 next_ep = episodes[cur_idx_in_all + 1]
-                log_info(f"Tombol [N] ditekan: Melanjutkan ke {next_ep['title']}...")
                 target_episodes = [next_ep]
                 cur_list_idx = 0
                 initial_start_pos = 0
@@ -2302,7 +2324,6 @@ def main():
         elif ret_code == 3:  # 'P' or '<' pressed inside MPV
             if has_prev:
                 prev_ep = episodes[cur_idx_in_all - 1]
-                log_info(f"Tombol [P] ditekan: Kembali ke {prev_ep['title']}...")
                 target_episodes = [prev_ep]
                 cur_list_idx = 0
                 initial_start_pos = 0
