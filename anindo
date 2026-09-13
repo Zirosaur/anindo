@@ -2,7 +2,7 @@
 """
 anindo - CLI Streaming Anime Subtitle Indonesia (ani-cli alternative with Indonesian subtitles)
 Author: Google Deepmind Antigravity Pair Programmer for ziro
-Version: 1.7.0 (Modular Provider & Cross-Provider Stream Fallback)
+Version: 1.3.0 (Modular Provider & Cross-Provider Stream Fallback)
 """
 
 import sys
@@ -28,7 +28,7 @@ try:
 except ImportError:
     AESGCM = None
 
-VERSION = "1.7.0"
+VERSION = "1.3.0"
 CACHE_DIR = Path.home() / ".cache" / "anindo"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 HISTORY_FILE = CACHE_DIR / "history.json"
