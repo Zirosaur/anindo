@@ -2,7 +2,7 @@
 """
 anindo - CLI Streaming Anime Subtitle Indonesia (ani-cli alternative with Indonesian subtitles)
 Author: Google Deepmind Antigravity Pair Programmer for ziro
-Version: 1.2.0
+Version: 1.3.0
 """
 
 import sys
@@ -10,12 +10,13 @@ import os
 import re
 import html
 import json
+import base64
 import argparse
 import subprocess
 import urllib.parse
 from pathlib import Path
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 CACHE_DIR = Path.home() / ".cache" / "anindo"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 HISTORY_FILE = CACHE_DIR / "history.json"
@@ -65,10 +66,27 @@ def curl_redirect(url, timeout=5):
     except Exception:
         return None
 
+def curl_post_ajax(body_dict, referer, timeout=6):
+    body_str = "&".join(f"{k}={v}" for k, v in body_dict.items())
+    cmd = [
+        "curl", "-s", "-X", "POST", f"{OTAKUDESU_BASE}/wp-admin/admin-ajax.php",
+        "-H", f"User-Agent: {USER_AGENT}",
+        "-H", f"Referer: {referer}",
+        "-H", f"Origin: {OTAKUDESU_BASE}",
+        "-H", "X-Requested-With: XMLHttpRequest",
+        "--max-time", str(timeout),
+        "-d", body_str
+    ]
+    try:
+        out = subprocess.check_output(cmd).decode("utf-8", "ignore")
+        return json.loads(out)
+    except Exception:
+        return {}
+
 def resolve_pixeldrain(raw_href):
     loc = curl_redirect(raw_href, timeout=5)
     if not loc or "pixeldrain.com/u/" not in loc:
-        return None
+        return None, None
     file_id = loc.split("/u/")[1].split("/")[0]
     p_url = f"https://pixeldrain.com/api/file/{file_id}"
     
@@ -78,7 +96,7 @@ def resolve_pixeldrain(raw_href):
         out = subprocess.check_output(cmd).decode("utf-8", "ignore")
         first_line = out.splitlines()[0] if out.splitlines() else ""
         if "200" in first_line:
-            return p_url
+            return p_url, None
         elif "451" in first_line:
             log_warn(f"Pixeldrain: Berkas diblokir DMCA (HTTP 451)")
         elif "404" in first_line:
@@ -87,12 +105,12 @@ def resolve_pixeldrain(raw_href):
             log_warn(f"Pixeldrain tidak merespon 200 OK: {first_line.strip()}")
     except Exception:
         pass
-    return None
+    return None, None
 
 def resolve_filedon(raw_href):
-    loc = curl_redirect(raw_href, timeout=5)
+    loc = curl_redirect(raw_href, timeout=5) if "desustream" in raw_href else raw_href
     if not loc:
-        return None
+        return None, None
     embed_url = loc.replace("/view/", "/embed/")
     try:
         page = curl_get(embed_url, timeout=5)
@@ -101,13 +119,54 @@ def resolve_filedon(raw_href):
             data = json.loads(html.unescape(m.group(1)))
             r2_url = data.get("props", {}).get("url")
             if r2_url:
-                return r2_url
+                return r2_url, None
     except Exception:
         pass
-    return None
+    return None, None
 
-def resolve_direct(raw_href):
-    return raw_href
+def resolve_yourupload_embed(embed_url):
+    m_id = re.search(r'id=([A-Za-z0-9_-]+)', embed_url)
+    if not m_id:
+        m_id = re.search(r'/embed/([A-Za-z0-9_-]+)', embed_url)
+    if not m_id:
+        return None, None
+    yu_id = m_id.group(1)
+    page = curl_get(f"https://yourupload.com/embed/{yu_id}", referer="https://desudrive.com/", timeout=6)
+    v_match = re.search(r"file\s*:\s*['\"](https?://[^'\"]+\.mp4[^'\"]*)['\"]", page)
+    if not v_match:
+        v_match = re.search(r'property="og:video"\s+content="([^"]+)"', page)
+    if v_match:
+        return v_match.group(1), "https://yourupload.com/"
+    return None, None
+
+def resolve_mirror_stream(ep_url, data_b64, mirror_name, actions):
+    if len(actions) < 2:
+        return None, None
+    nonce_data = curl_post_ajax({"action": actions[1]}, referer=ep_url)
+    nonce = nonce_data.get("data")
+    if not nonce:
+        return None, None
+
+    payload = json.loads(base64.b64decode(data_b64).decode("utf-8"))
+    payload["nonce"] = nonce
+    payload["action"] = actions[0]
+
+    resp = curl_post_ajax(payload, referer=ep_url)
+    embed_b64 = resp.get("data", "")
+    if not embed_b64:
+        return None, None
+    embed_html = base64.b64decode(embed_b64).decode("utf-8", "ignore")
+    src_m = re.search(r'src=["\']([^"\']+)["\']', embed_html)
+    if not src_m:
+        return None, None
+    src_url = src_m.group(1)
+
+    if "yourupload" in mirror_name.lower() or "yuplod" in src_url:
+        return resolve_yourupload_embed(src_url)
+    elif "filedon" in mirror_name.lower() or "filedon" in src_url:
+        return resolve_filedon(src_url)
+    
+    return src_url, None
 
 def fzf_select(items, prompt="Pilih: ", display_fn=str):
     """Interactive selection using fzf with keyboard navigation."""
@@ -236,28 +295,26 @@ def extract_stream_candidates(ep_url):
     html_page = curl_get(ep_url)
     candidates = []
 
-    # 1. Check default iframe for odcdn / desustream
+    # 1. Check default iframe for direct odcloud / desustream
     iframes = re.findall(r'<iframe[^>]+src="([^"]+)"', html_page)
     for ifr in iframes:
         if "desustream" in ifr or "odcdn" in ifr:
             try:
-                ifr_html = curl_get(ifr, referer=ep_url, timeout=5)
+                ifr_html = curl_get(ifr, referer=ep_url, timeout=4)
                 v_urls = re.findall(r'videoURL\s*=\s*["\']([^"\']+)["\']', ifr_html)
                 for v in v_urls:
                     candidates.append({
                         "quality": "720p",
                         "server": "ODCloud",
-                        "href": v,
-                        "resolver": resolve_direct
+                        "resolve_fn": lambda v_url=v: (v_url, None)
                     })
             except Exception:
                 pass
 
-    # 2. Check download section for mirrors (Filedon, Pixeldrain, etc.)
+    # 2. Check download section for mirrors (Filedon, Pixeldrain)
     m = re.search(r'<div class="download">(.*?)</div>', html_page, re.DOTALL)
     if m:
-        dl_html = m.group(1)
-        for li in re.findall(r'<li>(.*?)</li>', dl_html, re.DOTALL):
+        for li in re.findall(r'<li>(.*?)</li>', m.group(1), re.DOTALL):
             q_m = re.search(r'<strong>(.*?)</strong>', li)
             quality = q_m.group(1).strip() if q_m else "720p"
             links = re.findall(r'<a href="([^"]+)"[^>]*>([^<]+)</a>', li)
@@ -267,20 +324,36 @@ def extract_stream_candidates(ep_url):
                     candidates.append({
                         "quality": quality,
                         "server": "Filedon",
-                        "href": href,
-                        "resolver": resolve_filedon
+                        "resolve_fn": lambda h=href: resolve_filedon(h)
                     })
                 elif host_clean in ["Pdrain", "Pixeldrain", "PDrain"]:
                     candidates.append({
                         "quality": quality,
                         "server": "Pixeldrain",
-                        "href": href,
-                        "resolver": resolve_pixeldrain
+                        "resolve_fn": lambda h=href: resolve_pixeldrain(h)
                     })
+
+    # 3. Check mirrorstream section (YourUpload, Filedon, VidHide, etc.)
+    actions = re.findall(r'action:"([a-f0-9]{32})"', html_page)
+    mirrors = re.findall(r'<a\s+href="#"\s+data-content="([^"]+)">([^<]+)</a>', html_page)
+    for b64, name in mirrors:
+        try:
+            payload = json.loads(base64.b64decode(b64).decode("utf-8"))
+            quality = payload.get("q", "720p")
+            clean_name = name.strip()
+            # Support known working mirrors like YourUpload, Filedon, VidHide
+            if any(k in clean_name.lower() for k in ["yourupload", "filedon", "vidhide", "odstream", "ondesuhd"]):
+                candidates.append({
+                    "quality": quality,
+                    "server": f"{clean_name.title()} (Mirror)",
+                    "resolve_fn": lambda b=b64, n=clean_name: resolve_mirror_stream(ep_url, b, n, actions)
+                })
+        except Exception:
+            pass
 
     return candidates
 
-def play_video(url, title, quality_label=""):
+def play_video(url, title, quality_label="", referer=None):
     """Play video stream via MPV."""
     log_success(f"Memutar: {title} ({quality_label})")
     mpv_cmd = [
@@ -289,20 +362,25 @@ def play_video(url, title, quality_label=""):
         "--resume-playback=yes",
         "--save-position-on-quit=yes",
         "--keep-open=no",
-        url
     ]
+    if referer:
+        mpv_cmd.append(f"--referrer={referer}")
+    mpv_cmd.append(url)
     try:
         ret = subprocess.run(mpv_cmd)
         return ret.returncode == 0
     except KeyboardInterrupt:
-        return True # User stopped intentionally
+        return True
 
-def download_video(url, title, quality_label=""):
+def download_video(url, title, quality_label="", referer=None):
     """Download video stream with curl."""
     safe_name = re.sub(r'[^A-Za-z0-9._ -]+', '_', f"{title} [{quality_label}].mp4")
     dest_path = Path.cwd() / safe_name
     log_info(f"Mengunduh ke: {dest_path}")
-    dl_cmd = ["curl", "-L", "-H", f"User-Agent: {USER_AGENT}", "-o", str(dest_path), "--progress-bar", url]
+    dl_cmd = ["curl", "-L", "-H", f"User-Agent: {USER_AGENT}"]
+    if referer:
+        dl_cmd.extend(["-H", f"Referer: {referer}"])
+    dl_cmd.extend(["-o", str(dest_path), "--progress-bar", url])
     subprocess.run(dl_cmd)
     log_success(f"Selesai mengunduh: {dest_path}")
 
@@ -498,10 +576,13 @@ def main():
             elif "480" in q: s += 100
             elif "360" in q: s += 50
 
-            # Server priority: Filedon & Pixeldrain are direct fast CDNs
-            if c["server"] == "Filedon": s += 15
-            elif c["server"] == "Pixeldrain": s += 10
-            elif c["server"] == "ODCloud": s += 8
+            # Server priority: Filedon & Pixeldrain & YourUpload
+            srv = c["server"].lower()
+            if "filedon" in srv: s += 25
+            elif "pixeldrain" in srv: s += 20
+            elif "yourupload" in srv: s += 18
+            elif "odcloud" in srv: s += 15
+            else: s += 5
             return s
 
         candidates.sort(key=score_candidate, reverse=True)
@@ -511,7 +592,7 @@ def main():
             s_name = cand["server"]
             s_qual = cand["quality"]
             log_info(f"Mencoba server {s_name} ({s_qual})...")
-            stream_url = cand["resolver"](cand["href"])
+            stream_url, ref = cand["resolve_fn"]()
             if not stream_url:
                 log_warn(f"Server {s_name} ({s_qual}) tidak tersedia, mencoba alternatif berikutnya...")
                 continue
@@ -519,11 +600,11 @@ def main():
             save_history(selected_anime["title"], selected_anime["url"], ep["title"], ep["ep_num"], ep["url"])
 
             if args.download:
-                download_video(stream_url, f"{selected_anime['title']} - {ep['title']}", s_qual)
+                download_video(stream_url, f"{selected_anime['title']} - {ep['title']}", s_qual, referer=ref)
                 played_successfully = True
                 break
             else:
-                ok = play_video(stream_url, f"{selected_anime['title']} - {ep['title']}", f"{s_qual} - {s_name}")
+                ok = play_video(stream_url, f"{selected_anime['title']} - {ep['title']}", f"{s_qual} - {s_name}", referer=ref)
                 if ok:
                     played_successfully = True
                     break
