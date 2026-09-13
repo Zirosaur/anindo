@@ -12,13 +12,15 @@
 
 ## ✨ Fitur
 
-- 🇮🇩 **Subtitle Bahasa Indonesia Asli**: Sub Indo sudah tertanam langsung di videonya (hardsub/softsub), tidak perlu repot sinkronisasi subtitle eksternal.
-- ⚡ **Pencarian Interaktif Cepat**: Menggunakan `fzf` untuk memilih anime dan episode dengan navigasi keyboard.
-- 🔄 **Multi-Server & Auto-Fallback**: Mendukung berbagai server mirror berkecepatan tinggi (Filedon / Cloudflare R2, Pixeldrain, ODCloud). Jika satu server gagal atau terkena blokir DMCA (HTTP 451), otomatis berpindah ke server alternatif.
-- 📺 **Pemutar Video MPV**: Streaming langsung tanpa iklan, tanpa browser, mendukung resume posisi tontonan terakhir.
-- ⏭️ **Auto-Next Episode**: Menanyakan otomatis pemutaran episode berikutnya setelah episode selesai.
-- 🕒 **Riwayat Tontonan (History & Continue)**: Menyimpan episode terakhir yang ditonton untuk melanjutkan kapan saja (`-c`).
-- 🔥 **Anime On-Going**: Akses cepat ke daftar anime yang sedang rilis pekan ini (`-o`).
+- 🇮🇩 **Subtitle Bahasa Indonesia Asli**: Sub Indo sudah tertanam langsung di videonya (hardsub), tidak perlu repot sinkronisasi file `.srt` eksternal.
+- 🏎️ **Koleksi Lengkap (Modern + Anime Lawas/Vintage)**: Mendukung anime modern maupun anime klasik tahun 90-an & 2000-an seperti *Initial D (Stage 1-Final)*, *Slam Dunk*, *Great Teacher Onizuka (GTO)*, *Cowboy Bebop*, *Neon Genesis Evangelion*, dll.
+- 🌐 **Multi-Provider Search**: Melakukan pencarian paralel ke berbagai penyedia anime Sub Indo (Otakudesu & NontonAnime) secara otomatis.
+- ⚡ **Pencarian Interaktif Cepat**: Menggunakan `fzf` untuk memilih anime dan episode dengan navigasi keyboard yang responsif.
+- 🔄 **Multi-Server & Auto-Fallback**: Mendukung berbagai server mirror berkecepatan tinggi (Filedon / Cloudflare R2, Pixeldrain, Putarin HLS, YourUpload, ODCloud). Jika satu server DMCA/offline, otomatis beralih ke server cadangan.
+- 📺 **Pemutar Video MPV**: Streaming langsung tanpa iklan web atau pop-up, mendukung resume posisi tontonan terakhir.
+- ⏭️ **Auto-Next Episode**: Menawarkan pemutaran episode berikutnya secara otomatis setelah episode selesai.
+- 🕒 **Riwayat Tontonan (History & Continue)**: Menyimpan riwayat tontonan untuk langsung melanjutkan kapan saja (`-c`).
+- 🔥 **Anime On-Going**: Akses cepat ke daftar anime yang sedang rilis musim ini (`-o`).
 - 📥 **Opsi Download**: Bisa mengunduh video ke penyimpanan lokal (`-d`).
 
 ---
@@ -31,20 +33,21 @@ Pastikan peralatan berikut sudah terpasang di sistemmu:
 - **mpv** (pemutar video)
 - **fzf** (menu interaktif terminal)
 - **curl** (pengambil data web)
+- **python-cryptography** (untuk dekripsi stream HLS anime klasik)
 
 ### Cara Install Dependensi:
 
 * **Arch Linux / Manjaro:**
   ```bash
-  sudo pacman -S python mpv fzf curl
+  sudo pacman -S python python-cryptography mpv fzf curl yt-dlp
   ```
 * **Ubuntu / Debian / Linux Mint:**
   ```bash
-  sudo apt update && sudo apt install python3 mpv fzf curl
+  sudo apt update && sudo apt install python3 python3-cryptography mpv fzf curl yt-dlp
   ```
 * **Fedora:**
   ```bash
-  sudo dnf install python3 mpv fzf curl
+  sudo dnf install python3 python3-cryptography mpv fzf curl yt-dlp
   ```
 
 ---
@@ -63,7 +66,7 @@ cd anindo
 ./install.sh
 ```
 
-### Cara 2: Manual (Tanpa Installer)
+### Cara 3: Manual (Tanpa Installer)
 Cukup salin berkas `anindo` ke folder bin lokal:
 ```bash
 mkdir -p ~/.local/bin
@@ -71,7 +74,7 @@ cp anindo ~/.local/bin/anindo
 chmod +x ~/.local/bin/anindo
 ln -sf ~/.local/bin/anindo ~/.local/bin/ani-cli-id
 ```
-*(Pastikan `~/.local/bin` sudah ada di `$PATH` shell kamu)*.
+*(Pastikan `~/.local/bin` sudah terdaftar di `$PATH` shell kamu)*.
 
 ---
 
@@ -83,16 +86,18 @@ Jalankan tanpa argumen untuk menampilkan menu pilihan:
 anindo
 ```
 
-### 2. Cari Anime Berdasarkan Judul
+### 2. Cari Anime (Modern atau Klasik)
 ```bash
+anindo "initial d"
 anindo frieren
-anindo "jujutsu kaisen"
+anindo "slam dunk"
 anindo "one piece"
 ```
 
 ### 3. Tonton Episode Tertentu Langsung
 Gunakan opsi `-e` atau `--episode`:
 ```bash
+anindo "initial d" -e 1
 anindo "frieren" -e 10
 anindo "one piece" -e 1177
 ```
@@ -106,12 +111,19 @@ anindo -o
 ```bash
 anindo -c
 ```
-Atau lihat daftar riwayat:
+Atau lihat daftar riwayat yang pernah ditonton:
 ```bash
 anindo --history
 ```
 
-### 6. Memilih Kualitas Video (Resolusi)
+### 6. Memilih Sumber Data (Provider)
+Secara default mencari di semua penyedia (`all`). Kamu bisa memilih secara spesifik:
+```bash
+anindo -p nontonanime "initial d"
+anindo -p otakudesu "frieren"
+```
+
+### 7. Memilih Kualitas Video (Resolusi)
 Kualitas default adalah yang tertinggi (`best`). Kamu bisa menentukan resolusi pilihan:
 ```bash
 anindo -q 720 "frieren"
@@ -119,9 +131,9 @@ anindo -q 480 "naruto"
 ```
 Pilihan kualitas: `360`, `480`, `720`, `1080`, `best`.
 
-### 7. Mengunduh Video (Download)
+### 8. Mengunduh Video (Download)
 ```bash
-anindo -d -e 1 "frieren"
+anindo -d -e 1 "initial d"
 ```
 
 ---
@@ -129,15 +141,18 @@ anindo -d -e 1 "frieren"
 ## 🛠️ Opsi Perintah Lengkap
 
 ```text
-usage: anindo [-h] [-e EPISODE] [-q {360,480,720,1080,best}] [-o] [-c] [-d] [--history] [-V] [query]
+usage: anindo [-h] [-e EPISODE] [-q {360,480,720,1080,best}]
+              [-p {all,otakudesu,nontonanime}] [-o] [-c] [-d] [--history] [-V]
+              [query]
 
 positional arguments:
-  query                 Judul anime yang dicari
+  query                 Judul anime yang dicari (misal: 'initial d', 'frieren')
 
 options:
   -h, --help            Tampilkan bantuan dan keluar
   -e, --episode EPISODE Nomor episode langsung (misal: -e 10)
   -q, --quality         Kualitas video pilihan (default: best)
+  -p, --provider        Pilih sumber anime: all, otakudesu, nontonanime (default: all)
   -o, --ongoing         Pilih dari daftar anime on-going terbaru
   -c, --continue-watch  Lanjutkan anime dari riwayat terakhir
   -d, --download        Unduh video ke lokal alih-alih memutar
