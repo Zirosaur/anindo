@@ -592,13 +592,13 @@ def play_video(url, title, quality_label="", referer=None, is_hls=False):
     mpv_cmd = [
         "mpv",
         f"--force-media-title=[Sub Indo] {title}",
+        f"--user-agent={USER_AGENT}",
         "--resume-playback=yes",
         "--save-position-on-quit=yes",
         "--keep-open=no",
     ]
     if referer:
         mpv_cmd.append(f"--referrer={referer}")
-        mpv_cmd.append(f"--http-header-fields=User-Agent: {USER_AGENT}, Referer: {referer}")
 
     mpv_cmd.append(stream_to_play)
 
