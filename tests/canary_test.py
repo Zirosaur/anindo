@@ -133,6 +133,63 @@ def test_code_integrity():
 
 run_check("Code Integrity & Watch State Helpers", test_code_integrity)
 
+# 7. Check Batch Range Parsing & Config Preferences
+def test_batch_range_and_config():
+    parse_fn = mod.get("parse_episode_spec")
+    assert callable(parse_fn), "parse_episode_spec is missing or not callable"
+
+    sample_episodes = [
+        {"title": f"Episode {i}", "ep_num": float(i), "url": f"https://example.com/ep/{i}"}
+        for i in range(1, 13)
+    ]
+    # Add a special 2.5 OVA episode
+    sample_episodes.insert(2, {"title": "Episode 2.5 OVA", "ep_num": 2.5, "url": "https://example.com/ep/2.5"})
+
+    # Test single
+    res = parse_fn("4", sample_episodes)
+    assert len(res) == 1 and res[0]["ep_num"] == 4.0, f"Expected Ep 4, got {res}"
+
+    # Test float
+    res = parse_fn("2.5", sample_episodes)
+    assert len(res) == 1 and res[0]["ep_num"] == 2.5, f"Expected Ep 2.5, got {res}"
+
+    # Test range
+    res = parse_fn("1-3", sample_episodes)
+    nums = [e["ep_num"] for e in res]
+    assert nums == [1.0, 2.0, 2.5, 3.0], f"Expected [1, 2, 2.5, 3], got {nums}"
+
+    # Test comma list
+    res = parse_fn("1, 5, 8", sample_episodes)
+    nums = [e["ep_num"] for e in res]
+    assert nums == [1.0, 5.0, 8.0], f"Expected [1, 5, 8], got {nums}"
+
+    # Test combination
+    res = parse_fn("1-2, 6, 10-12", sample_episodes)
+    nums = [e["ep_num"] for e in res]
+    assert nums == [1.0, 2.0, 6.0, 10.0, 11.0, 12.0], f"Expected combination, got {nums}"
+
+    # Test all
+    res = parse_fn("all", sample_episodes)
+    assert len(res) == len(sample_episodes), "Expected all episodes"
+    res_star = parse_fn("*", sample_episodes)
+    assert len(res_star) == len(sample_episodes), "Expected all episodes for '*'"
+
+    # Test invalid / empty
+    assert parse_fn("", sample_episodes) == [], "Expected [] for empty spec"
+    assert parse_fn("999", sample_episodes) == [], "Expected [] for non-matching spec"
+
+    # Test user config loader
+    load_cfg = mod.get("load_user_config")
+    assert callable(load_cfg), "load_user_config is missing or not callable"
+    cfg = load_cfg()
+    assert isinstance(cfg, dict), "load_user_config() must return a dict"
+    for key in ("default_quality", "default_provider", "download_dir", "preferred_downloader", "mpv_flags", "notify"):
+        assert key in cfg, f"Missing config key: {key}"
+
+    print(f"  parse_episode_spec & user config loader verified (10/10 assertions pass)")
+
+run_check("Batch Range Parser & User Config Loader", test_batch_range_and_config)
+
 # Summary
 print("\n" + "=" * 60)
 if failures:
