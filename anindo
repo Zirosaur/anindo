@@ -78,6 +78,30 @@ def load_user_config():
             pass
     return cfg
 
+def save_user_config(cfg: dict) -> bool:
+    """Save user configuration dictionary to ~/.config/anindo/config.json."""
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        with open(USER_CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+        return True
+    except Exception as e:
+        log_err(f"Gagal menyimpan konfigurasi: {e}")
+        return False
+
+def get_default_download_dir() -> Path:
+    """Determine default download directory (~/Downloads/Anime or localized via xdg-user-dir)."""
+    try:
+        res = subprocess.check_output(["xdg-user-dir", "DOWNLOAD"], text=True, timeout=1).strip()
+        if res and os.path.isdir(res):
+            return Path(res) / "Anime"
+    except Exception:
+        pass
+    xdg_dl = os.environ.get("XDG_DOWNLOAD_DIR")
+    if xdg_dl and os.path.isdir(os.path.expanduser(xdg_dl)):
+        return Path(os.path.expanduser(xdg_dl)) / "Anime"
+    return Path.home() / "Downloads" / "Anime"
+
 USER_CONFIG = load_user_config()
 
 REMOTE_DOMAINS_URL = "https://raw.githubusercontent.com/Zirosaur/anindo/main/domains.json"
@@ -1097,6 +1121,21 @@ def play_video(url, title, quality_label="", referer=None, is_hls=False, start_p
     except Exception:
         pass
 
+    # Temporary input.conf for in-player hotkeys (N: next episode, P: prev episode)
+    input_conf_file = Path(f"/tmp/anindo-input-{os.getpid()}.conf")
+    try:
+        with open(input_conf_file, "w", encoding="utf-8") as f:
+            f.write(
+                "n quit 2\n"
+                "N quit 2\n"
+                "> quit 2\n"
+                "p quit 3\n"
+                "P quit 3\n"
+                "< quit 3\n"
+            )
+    except Exception:
+        input_conf_file = None
+
     mpv_cmd = [
         "mpv",
         f"--title=anindo: {title}",
@@ -1107,6 +1146,12 @@ def play_video(url, title, quality_label="", referer=None, is_hls=False, start_p
         "--keep-open=no",
         f"--input-ipc-server={sock_path}",
     ]
+    if input_conf_file:
+        mpv_cmd.append(f"--input-conf={input_conf_file}")
+
+    clean_osd_title = re.sub(r'[\r\n]+', ' ', title)
+    mpv_cmd.append(f"--osd-playing-msg=[anindo] {clean_osd_title}\\n[N / >] Episode Berikutnya  |  [P / <] Episode Sebelumnya  |  [Q] Menu")
+    mpv_cmd.append("--osd-playing-msg-duration=4000")
 
     # Append custom user flags from ~/.config/anindo/config.json
     user_flags = USER_CONFIG.get("mpv_flags", [])
@@ -1215,6 +1260,11 @@ def play_video(url, title, quality_label="", referer=None, is_hls=False, start_p
                 os.unlink(sock_path)
             except Exception:
                 pass
+        if input_conf_file and input_conf_file.exists():
+            try:
+                input_conf_file.unlink()
+            except Exception:
+                pass
         if server:
             server.shutdown()
 
@@ -1226,18 +1276,22 @@ def play_video(url, title, quality_label="", referer=None, is_hls=False, start_p
     if final_percent >= 85.0 or (final_duration > 60 and (final_duration - final_time) <= 60):
         status = "completed"
         save_time = 0
-    elif final_time > 10.0:
+    elif final_time >= 2.0:
         status = "in_progress"
         save_time = int(final_time)
+    elif start_pos and start_pos > 0:
+        status = "in_progress"
+        save_time = int(start_pos)
     else:
         status = "not_started"
         save_time = 0
 
-    return (ret_code == 0 or final_time > 0), {
+    return (ret_code in (0, 2, 3) or final_time > 0), {
         "status": status,
         "time_pos": save_time,
         "percent": int(final_percent),
-        "duration": int(final_duration)
+        "duration": int(final_duration),
+        "ret_code": ret_code
     }
 
 def download_video(url, title, quality_label="", referer=None, is_hls=False, dest_dir=None):
@@ -1251,7 +1305,7 @@ def download_video(url, title, quality_label="", referer=None, is_hls=False, des
     elif USER_CONFIG.get("download_dir"):
         target_dir = Path(os.path.expanduser(USER_CONFIG["download_dir"])).resolve()
     else:
-        target_dir = Path.cwd()
+        target_dir = get_default_download_dir()
 
     try:
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -1354,6 +1408,14 @@ def save_history(anime_title, anime_url, episode_title, episode_num, episode_url
                 history = json.load(f)
         except Exception:
             history = {}
+
+    existing = history.get(anime_url)
+    if existing and existing.get("last_ep_num") == episode_num:
+        if status == "not_started" and time_pos == 0 and existing.get("time_pos", 0) > 0:
+            time_pos = existing["time_pos"]
+            percent = existing.get("percent", 0)
+            duration = existing.get("duration", duration)
+            status = existing.get("status", "in_progress")
 
     now_ts = int(time.time())
     now_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(now_ts))
@@ -1519,6 +1581,109 @@ def fzf_select(items, prompt="Pilih: ", display_fn=str):
                 return None
     return None
 
+def interactive_settings_menu():
+    """Interactive Settings UI for managing user configuration."""
+    global USER_CONFIG
+    while True:
+        dl_dir_display = USER_CONFIG.get("download_dir") or f"{get_default_download_dir()} (Bawaan)"
+        qual_display = USER_CONFIG.get("default_quality", "best")
+        prov_display = USER_CONFIG.get("default_provider", "all")
+        down_display = USER_CONFIG.get("preferred_downloader", "auto")
+        notif_display = "Aktif (Ya)" if USER_CONFIG.get("notify", True) else "Nonaktif (Tidak)"
+
+        settings_items = [
+            {"action": "download_dir", "label": f"📁 Folder Unduhan       : {dl_dir_display}"},
+            {"action": "quality",      "label": f"🎯 Kualitas Default     : {qual_display}"},
+            {"action": "provider",     "label": f"🌐 Provider Default     : {prov_display}"},
+            {"action": "downloader",   "label": f"🚀 Downloader Pilihan   : {down_display}"},
+            {"action": "notify",       "label": f"🔔 Notifikasi Desktop   : {notif_display}"},
+            {"action": "reset",        "label": f"🔄 Reset ke Pengaturan Awal"},
+            {"action": "back",         "label": f"🔙 Kembali ke Menu Utama"}
+        ]
+
+        choice = fzf_select(settings_items, prompt="Pengaturan anindo: ", display_fn=lambda x: x["label"])
+        if not choice or choice["action"] == "back":
+            break
+
+        act = choice["action"]
+        if act == "download_dir":
+            def_dl = str(get_default_download_dir())
+            vids_dl = str(Path.home() / "Videos" / "Anime")
+            opts = [
+                {"val": def_dl, "label": f"1. {def_dl} (Standar Unduhan)"},
+                {"val": vids_dl, "label": f"2. {vids_dl} (Folder Video)"},
+                {"val": "custom", "label": "3. ✍ Ketik path kustom sendiri..."},
+                {"val": "cancel", "label": "4. ❌ Batal"}
+            ]
+            sub = fzf_select(opts, prompt="Pilih Lokasi Unduhan: ", display_fn=lambda x: x["label"])
+            if not sub or sub["val"] == "cancel":
+                continue
+            if sub["val"] == "custom":
+                try:
+                    new_dir = input(f"\n{C_BOLD}Ketik folder tujuan baru (contoh: ~/Videos/Anime): {C_RESET}").strip()
+                    if new_dir:
+                        expanded = str(Path(os.path.expanduser(new_dir)).resolve())
+                        USER_CONFIG["download_dir"] = expanded
+                        save_user_config(USER_CONFIG)
+                        log_success(f"Folder unduhan berhasil diatur ke: {expanded}")
+                except (EOFError, KeyboardInterrupt):
+                    pass
+            else:
+                USER_CONFIG["download_dir"] = sub["val"]
+                save_user_config(USER_CONFIG)
+                log_success(f"Folder unduhan diatur ke: {sub['val']}")
+
+        elif act == "quality":
+            qual_opts = ["best (Resolusi Tertinggi)", "1080p", "720p", "480p", "360p"]
+            q_pick = fzf_select(qual_opts, prompt="Pilih Kualitas Video Bawaan: ")
+            if q_pick:
+                val = q_pick.split()[0]
+                USER_CONFIG["default_quality"] = val
+                save_user_config(USER_CONFIG)
+                log_success(f"Kualitas default diubah ke: {val}")
+
+        elif act == "provider":
+            prov_opts = ["all (Semua Penyedia)"] + REGISTRY.names()
+            p_pick = fzf_select(prov_opts, prompt="Pilih Penyedia Bawaan: ")
+            if p_pick:
+                val = p_pick.split()[0]
+                USER_CONFIG["default_provider"] = val
+                save_user_config(USER_CONFIG)
+                log_success(f"Penyedia default diubah ke: {val}")
+
+        elif act == "downloader":
+            dl_opts = [
+                "auto (Otomatis: aria2c 16-koneksi -> yt-dlp -> curl)",
+                "aria2c (Akselerasi multi-koneksi)",
+                "yt-dlp",
+                "curl (Standar)"
+            ]
+            d_pick = fzf_select(dl_opts, prompt="Pilih Downloader: ")
+            if d_pick:
+                val = d_pick.split()[0]
+                USER_CONFIG["preferred_downloader"] = val
+                save_user_config(USER_CONFIG)
+                log_success(f"Downloader pilihan diubah ke: {val}")
+
+        elif act == "notify":
+            cur = USER_CONFIG.get("notify", True)
+            USER_CONFIG["notify"] = not cur
+            save_user_config(USER_CONFIG)
+            st = "diaktifkan" if USER_CONFIG["notify"] else "dinonaktifkan"
+            log_success(f"Notifikasi desktop {st}.")
+
+        elif act == "reset":
+            USER_CONFIG = {
+                "default_quality": "best",
+                "default_provider": "all",
+                "download_dir": "",
+                "preferred_downloader": "auto",
+                "mpv_flags": [],
+                "notify": True
+            }
+            save_user_config(USER_CONFIG)
+            log_success("Pengaturan berhasil direset ke nilai default!")
+
 def main():
     global USER_CONFIG
     USER_CONFIG = load_user_config()
@@ -1540,6 +1705,7 @@ def main():
     parser.add_argument("-c", "--continue-watch", dest="continue_watch", action="store_true", help="Lanjutkan anime dari riwayat terakhir (otomatis episode berikutnya)")
     parser.add_argument("-d", "--download", action="store_true", help="Unduh video ke lokal alih-alih memutar (didukung aria2c/yt-dlp)")
     parser.add_argument("--history", action="store_true", help="Tampilkan riwayat anime yang pernah ditonton")
+    parser.add_argument("-s", "--settings", action="store_true", help="Buka menu pengaturan konfigurasi pengguna")
     parser.add_argument("-u", "--update", action="store_true", help="Periksa dan perbarui anindo ke versi rilis GitHub terbaru")
     parser.add_argument("--update-domains", action="store_true", help="Segarkan dan periksa domain aktif dari GitHub / resolver")
     parser.add_argument("-V", "--version", action="version", version=f"anindo v{VERSION}")
@@ -1553,6 +1719,10 @@ def main():
     print(f"{C_CYAN}{C_BOLD}╔══════════════════════════════════════════════════╗{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}║      anindo - Anime Subtitle Indonesia CLI       ║{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}╚══════════════════════════════════════════════════╝{C_RESET}\n")
+
+    if args.settings:
+        interactive_settings_menu()
+        return
 
     if args.update:
         check_and_self_update()
@@ -1619,8 +1789,11 @@ def main():
         if choice.get("status") == "in_progress" and choice.get("time_pos", 0) > 0:
             target_ep_num = ep_n
             initial_start_pos = choice["time_pos"]
-        else:
+        elif choice.get("status") == "completed":
             target_ep_num = (int(ep_n) if isinstance(ep_n, float) and ep_n.is_integer() else ep_n) + 1
+            initial_start_pos = 0
+        else:
+            target_ep_num = ep_n
             initial_start_pos = 0
     else:
         query = args.query
@@ -1640,12 +1813,16 @@ def main():
                     target_num = ep_n
                     start_time = time_pos
                     auto_title = f"▶ [Lanjut Nonton] {latest['anime_title']} - Episode {ep_str} [Lanjut di {time_str}] ({percent}%)"
-                else:
+                elif status == "completed":
                     next_n = (int(ep_n) if isinstance(ep_n, float) and ep_n.is_integer() else ep_n) + 1
                     next_str = str(int(next_n)) if isinstance(next_n, float) and next_n.is_integer() else str(next_n)
                     target_num = next_n
                     start_time = 0
                     auto_title = f"▶ [Lanjut Nonton] {latest['anime_title']} - Episode {next_str} (Selesai Ep {ep_str})"
+                else:
+                    target_num = ep_n
+                    start_time = 0
+                    auto_title = f"▶ [Lanjut Nonton] {latest['anime_title']} - Episode {ep_str}"
 
                 menu_items.append({
                     "action": "auto_resume",
@@ -1658,7 +1835,8 @@ def main():
             menu_items.extend([
                 {"action": "search", "title": "🔍 Cari Anime (Semua Koleksi + Lawas)"},
                 {"action": "ongoing", "title": "🔥 Anime On-Going Terbaru"},
-                {"action": "history", "title": "🕒 Riwayat Tontonan Lengkap..."}
+                {"action": "history", "title": "🕒 Riwayat Tontonan Lengkap..."},
+                {"action": "settings", "title": "⚙️ Pengaturan (Lokasi Unduhan, Kualitas, dll.)"}
             ])
 
             menu_pick = fzf_select(menu_items, prompt="Menu Utama: ", display_fn=lambda x: x["title"])
@@ -1677,6 +1855,9 @@ def main():
             elif menu_pick["action"] == "ongoing":
                 ongoing_list = get_ongoing_anime()
                 selected_anime = fzf_select(ongoing_list, prompt="Pilih Anime Ongoing: ", display_fn=lambda x: x["title"])
+            elif menu_pick["action"] == "settings":
+                interactive_settings_menu()
+                return
             elif menu_pick["action"] == "history":
                 if not hist:
                     log_warn("Belum ada riwayat tontonan.")
@@ -1699,8 +1880,11 @@ def main():
                 if choice.get("status") == "in_progress" and choice.get("time_pos", 0) > 0:
                     target_ep_num = ep_n
                     initial_start_pos = choice["time_pos"]
-                else:
+                elif choice.get("status") == "completed":
                     target_ep_num = (int(ep_n) if isinstance(ep_n, float) and ep_n.is_integer() else ep_n) + 1
+                    initial_start_pos = 0
+                else:
+                    target_ep_num = ep_n
                     initial_start_pos = 0
             else:
                 try:
@@ -2003,16 +2187,43 @@ def main():
         if not played_successfully:
             log_err(f"Semua server alternatif di semua penyedia gagal memuat {ep['title']}.")
 
-        # Check if user closed midway (in_progress):
+        # Check if user requested next/previous directly from MPV hotkeys:
+        ret_code = last_playback_info.get("ret_code", 0) if last_playback_info else 0
+        cur_idx_in_all = episodes.index(ep) if ep in episodes else -1
+        has_next = (cur_idx_in_all >= 0 and cur_idx_in_all + 1 < len(episodes))
+        has_prev = (cur_idx_in_all > 0)
+
+        if ret_code == 2:  # 'N' or '>' pressed inside MPV
+            if has_next:
+                next_ep = episodes[cur_idx_in_all + 1]
+                log_info(f"Tombol [N] ditekan: Melanjutkan ke {next_ep['title']}...")
+                target_episodes = [next_ep]
+                cur_list_idx = 0
+                initial_start_pos = 0
+                continue
+            else:
+                log_warn("Ini adalah episode terakhir dari seri ini!")
+
+        elif ret_code == 3:  # 'P' or '<' pressed inside MPV
+            if has_prev:
+                prev_ep = episodes[cur_idx_in_all - 1]
+                log_info(f"Tombol [P] ditekan: Kembali ke {prev_ep['title']}...")
+                target_episodes = [prev_ep]
+                cur_list_idx = 0
+                initial_start_pos = 0
+                continue
+            else:
+                log_warn("Ini adalah episode pertama dari seri ini!")
+
+        # Log completion / pause state
         if last_playback_info and last_playback_info.get("status") == "in_progress":
             t_str = format_time(last_playback_info['time_pos'])
             log_info(f"Tontonan dijeda di menit {t_str} ({last_playback_info['percent']}%). Progres tersimpan.")
-            break
         elif last_playback_info and last_playback_info.get("status") == "completed":
             log_success(f"Selesai menonton {ep['title']}!")
 
-        # Advance to next episode
-        if is_batch_mode:
+        # If user explicitly requested batch mode and episode was completed, autoplay next in batch
+        if is_batch_mode and last_playback_info and last_playback_info.get("status") == "completed":
             if cur_list_idx + 1 < len(target_episodes):
                 cur_list_idx += 1
                 initial_start_pos = 0
@@ -2021,28 +2232,78 @@ def main():
                 time.sleep(1)
                 continue
             else:
-                log_success("Semua episode dalam antrean telah selesai ditonton!")
+                log_success("Semua episode dalam antrean batch telah selesai ditonton!")
                 break
-        else:
-            # Single episode mode: check if there is a next episode in the anime's full list
-            cur_idx_in_all = episodes.index(ep) if ep in episodes else -1
-            if cur_idx_in_all >= 0 and cur_idx_in_all + 1 < len(episodes):
-                next_ep = episodes[cur_idx_in_all + 1]
-                try:
-                    print()
-                    ans = input(f"{C_CYAN}Putar episode berikutnya ({next_ep['title']})? [Y/n]: {C_RESET}").strip().lower()
-                    if ans in ("", "y", "ya", "yes"):
-                        target_episodes = [next_ep]
-                        cur_list_idx = 0
-                        initial_start_pos = 0
-                        continue
-                    else:
-                        break
-                except (EOFError, KeyboardInterrupt):
-                    print()
-                    break
+
+        # PLAYER NAVIGATION UI (Menu Kontrol Pemutar Interaktif)
+        nav_options = []
+
+        if last_playback_info and last_playback_info.get("status") == "in_progress" and last_playback_info.get("time_pos", 0) > 0:
+            t_str = format_time(last_playback_info["time_pos"])
+            nav_options.append({
+                "action": "resume",
+                "label": f"▶ Lanjutkan Episode Ini ({ep['title']}) [dari menit {t_str}]",
+                "ep": ep,
+                "start": last_playback_info["time_pos"]
+            })
+
+        if has_next:
+            next_ep = episodes[cur_idx_in_all + 1]
+            nav_options.append({
+                "action": "next",
+                "label": f"⏭ Episode Berikutnya ({next_ep['title']})",
+                "ep": next_ep,
+                "start": 0
+            })
+
+        if has_prev:
+            prev_ep = episodes[cur_idx_in_all - 1]
+            nav_options.append({
+                "action": "prev",
+                "label": f"⏮ Episode Sebelumnya ({prev_ep['title']})",
+                "ep": prev_ep,
+                "start": 0
+            })
+
+        nav_options.extend([
+            {
+                "action": "replay",
+                "label": f"🔄 Putar Ulang Episode Ini dari Awal ({ep['title']})",
+                "ep": ep,
+                "start": 0
+            },
+            {
+                "action": "pick",
+                "label": "📋 Pilih Episode Lain dari Daftar...",
+                "ep": None,
+                "start": 0
+            },
+            {
+                "action": "exit",
+                "label": "⏹ Selesai / Keluar ke Menu Utama",
+                "ep": None,
+                "start": 0
+            }
+        ])
+
+        nav_pick = fzf_select(nav_options, prompt=f"Navigasi Pemutar [{ep['title']}]: ", display_fn=lambda x: x["label"])
+        if not nav_pick or nav_pick["action"] == "exit":
+            break
+
+        act = nav_pick["action"]
+        if act in ("resume", "next", "prev", "replay"):
+            target_episodes = [nav_pick["ep"]]
+            cur_list_idx = 0
+            initial_start_pos = nav_pick["start"]
+            continue
+        elif act == "pick":
+            chosen_ep = fzf_select(episodes, prompt="Pilih Episode: ", display_fn=lambda x: x["title"])
+            if chosen_ep:
+                target_episodes = [chosen_ep]
+                cur_list_idx = 0
+                initial_start_pos = 0
+                continue
             else:
-                log_success("Ini adalah episode terakhir dari seri ini!")
                 break
 
 if __name__ == "__main__":

@@ -132,14 +132,20 @@ anindo "solo leveling" -e 1 -d       # Unduh episode 1
 anindo "solo leveling" -e 1-12 -d    # Unduh batch episode 1 sampai 12
 anindo "solo leveling" -e all -d     # Unduh semua episode dalam seri
 ```
-*Jika dijalankan tanpa `-e`, anindo akan menampilkan menu interaktif dengan opsi `[Unduh Semua Episode (Batch)]`.*
+*Secara bawaan berkas tersimpan di `~/Downloads/Anime` (dapat diubah via menu pengaturan interaktif atau config).*
 
-### 5. Tonton Anime On-Going Terbaru
+### 5. Navigasi & Kontrol Pemutar Saat Streaming
+Saat jendela MPV sedang memutar video, kamu dapat menavigasi episode secara instan:
+- **`N`** atau **`>`**: Lompat langsung ke **Episode Berikutnya**
+- **`P`** atau **`<`**: Kembali ke **Episode Sebelumnya**
+- **`Q`**: Menutup pemutar dan membuka **Menu Navigasi Pemutar Interaktif** (Lanjutkan dari menit terakhir, Episode Berikutnya/Sebelumnya, Putar Ulang, atau Pilih Episode Lain).
+
+### 6. Tonton Anime On-Going Terbaru
 ```bash
 anindo -o
 ```
 
-### 6. Lanjutkan Tontonan Terakhir (Resume History)
+### 7. Lanjutkan Tontonan Terakhir (Resume History)
 ```bash
 anindo -c
 ```
@@ -148,27 +154,34 @@ Atau lihat daftar riwayat lengkap yang pernah ditonton:
 anindo --history
 ```
 
-### 7. Memilih Sumber Data (Provider)
+### 8. Memilih Sumber Data (Provider)
 Secara default mencari di semua penyedia (`all`). Kamu bisa memilih secara spesifik:
 ```bash
 anindo -p nontonanime "initial d"
 anindo -p otakudesu "frieren"
 ```
 
-### 8. Memilih Kualitas Video (Resolusi)
+### 9. Memilih Kualitas Video (Resolusi)
 Kualitas default adalah yang tertinggi (`best`). Mendukung penulisan dengan atau tanpa `p`:
 ```bash
 anindo -q 720p "frieren"
 anindo -q 480 "naruto"
 ```
 
-### 9. Pembaruan Mandiri (Self-Update)
+### 10. Pengaturan Interaktif (UI Settings)
+Kamu dapat menyesuaikan folder unduhan, kualitas video bawaan, penyedia anime, dan preferensi lainnya dengan menu GUI/TUI tanpa perlu mengedit file JSON:
+```bash
+anindo -s
+# atau pilih "⚙️ Pengaturan" dari menu utama 'anindo'
+```
+
+### 11. Pembaruan Mandiri (Self-Update)
 Periksa dan perbarui binari `anindo` ke versi rilis GitHub terbaru:
 ```bash
 anindo -u
 ```
 
-### 10. Periksa & Perbarui Domain Sumber
+### 12. Periksa & Perbarui Domain Sumber
 Jika salah satu situs berganti domain, jalankan:
 ```bash
 anindo --update-domains
@@ -178,13 +191,13 @@ anindo --update-domains
 
 ## ⚙️ Konfigurasi Pengguna (`config.json`)
 
-Kamu dapat mengatur preferensi default di berkas `~/.config/anindo/config.json`:
+Kamu dapat mengatur preferensi default lewat menu interaktif `anindo -s` atau menyunting berkas `~/.config/anindo/config.json`:
 
 ```json
 {
   "default_quality": "720p",
   "default_provider": "all",
-  "download_dir": "~/Videos/Anime",
+  "download_dir": "~/Downloads/Anime",
   "preferred_downloader": "auto",
   "mpv_flags": [
     "--hwdec=auto",
@@ -198,7 +211,7 @@ Kamu dapat mengatur preferensi default di berkas `~/.config/anindo/config.json`:
 | :--- | :--- | :--- | :--- |
 | `default_quality` | string | `"best"` | Kualitas video bawaan (`360p`, `480p`, `720p`, `1080p`, `best`) |
 | `default_provider` | string | `"all"` | Penyedia default (`all`, `otakudesu`, `nontonanime`) |
-| `download_dir` | string | `""` | Folder tujuan unduhan (contoh: `"~/Videos/Anime"`). Jika kosong, disimpan di direktori saat ini |
+| `download_dir` | string | `""` (Bawaan: `~/Downloads/Anime`) | Folder tujuan unduhan. Jika kosong, otomatis menggunakan direktori Unduhan sistem (`~/Downloads/Anime`) |
 | `preferred_downloader` | string | `"auto"` | Urutan downloader pilihan (`"auto"`, `"aria2c"`, `"yt-dlp"`, `"curl"`) |
 | `mpv_flags` | list / string | `[]` | Argumen flag tambahan yang diteruskan langsung ke MPV |
 | `notify` | boolean | `true` | Toggle notifikasi desktop popup melalui `notify-send` |
@@ -209,7 +222,7 @@ Kamu dapat mengatur preferensi default di berkas `~/.config/anindo/config.json`:
 
 ```text
 usage: anindo [-h] [-e EPISODE] [-q {360,360p,480,480p,720,720p,1080,1080p,best}]
-              [-p {all,otakudesu,nontonanime}] [-o] [-c] [-d] [--history] [-u]
+              [-p {all,otakudesu,nontonanime}] [-o] [-c] [-d] [--history] [-s] [-u]
               [--update-domains] [-V] [query]
 
 positional arguments:
@@ -221,9 +234,10 @@ options:
   -q, --quality         Kualitas video pilihan (360p, 480p, 720p, 1080p, best)
   -p, --provider        Pilih penyedia anime: all, otakudesu, nontonanime
   -o, --ongoing         Pilih dari daftar anime on-going terbaru
-  -c, --continue-watch  Lanjutkan anime dari riwayat terakhir (otomatis episode berikutnya)
+  -c, --continue-watch  Lanjutkan anime dari riwayat terakhir
   -d, --download        Unduh video ke lokal alih-alih memutar (didukung aria2c/yt-dlp)
   --history             Tampilkan riwayat anime yang pernah ditonton
+  -s, --settings        Buka menu pengaturan interaktif (lokasi unduhan, kualitas, dll.)
   -u, --update          Periksa dan perbarui anindo ke versi rilis GitHub terbaru
   --update-domains      Segarkan dan periksa domain aktif dari GitHub / resolver
   -V, --version         Tampilkan versi program

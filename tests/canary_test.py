@@ -186,7 +186,17 @@ def test_batch_range_and_config():
     for key in ("default_quality", "default_provider", "download_dir", "preferred_downloader", "mpv_flags", "notify"):
         assert key in cfg, f"Missing config key: {key}"
 
-    print(f"  parse_episode_spec & user config loader verified (10/10 assertions pass)")
+    # Test get_default_download_dir
+    get_def_dl = mod.get("get_default_download_dir")
+    assert callable(get_def_dl), "get_default_download_dir is missing or not callable"
+    def_path = get_def_dl()
+    assert str(def_path).endswith("Anime"), f"Expected default download dir to end with 'Anime', got {def_path}"
+
+    # Test save_user_config
+    save_cfg = mod.get("save_user_config")
+    assert callable(save_cfg), "save_user_config is missing or not callable"
+
+    print(f"  parse_episode_spec, default download dir & user config verified (12/12 assertions pass)")
 
 run_check("Batch Range Parser & User Config Loader", test_batch_range_and_config)
 
