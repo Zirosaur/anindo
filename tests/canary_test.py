@@ -129,7 +129,20 @@ def test_code_integrity():
     assert callable(fmt_fn), "format_time is not callable"
     assert fmt_fn(65) == "01:05", f"Expected 01:05, got {fmt_fn(65)}"
     assert fmt_fn(3665) == "01:01:05", f"Expected 01:01:05, got {fmt_fn(3665)}"
-    print("  Code integrity & XDG watch state verified: 0 undefined globals")
+
+    # Check str_display_width, pad_box_line, render_player_dashboard
+    disp_w = mod.get("str_display_width")
+    assert callable(disp_w), "str_display_width is not callable"
+    assert disp_w("test") == 4
+    assert disp_w("🎬 test") == 7
+
+    pad_fn = mod.get("pad_box_line")
+    assert callable(pad_fn), "pad_box_line is not callable"
+
+    dash_fn = mod.get("render_player_dashboard")
+    assert callable(dash_fn), "render_player_dashboard is not callable"
+
+    print("  Code integrity, player dashboard & XDG watch state verified: 0 undefined globals")
 
 run_check("Code Integrity & Watch State Helpers", test_code_integrity)
 

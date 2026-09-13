@@ -19,6 +19,7 @@ import urllib.request
 import time
 import socket
 import threading
+import unicodedata
 import concurrent.futures
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -153,6 +154,7 @@ C_RED = "\033[1;31m"
 C_CYAN = "\033[1;36m"
 C_MAGENTA = "\033[1;35m"
 C_DIM = "\033[2m"
+C_GRAY = "\033[90m"
 
 def log_info(msg):
     print(f"{C_BLUE}[anindo]{C_RESET} {msg}", file=sys.stderr)
@@ -1016,39 +1018,63 @@ def extract_stream_candidates(ep_item):
 # ==============================================================================
 # 5. VIDEO PLAYER & DOWNLOAD ENGINE
 # ==============================================================================
-def play_video(url, title, quality_label="", referer=None, is_hls=False):
-    """Play video stream via MPV with optional local HLS proxy."""
-    log_success(f"Memutar: {title} ({quality_label})")
+def str_display_width(s: str) -> int:
+    """Calculate visible display column width of a string (handling ANSI escape codes and wide glyphs)."""
+    s_clean = re.sub(r'\x1b\[[0-9;]*m', '', s)
+    w = 0
+    for ch in s_clean:
+        if ch in ('🎬', '📺', '⌨️', '⏸', '▶', '🔊', '⏮', '⏭', '🔄', '📋', '⏹', '⚙️'):
+            w += 2
+        elif unicodedata.east_asian_width(ch) in ('W', 'F'):
+            w += 2
+        else:
+            w += 1
+    return w
 
-    server = None
-    stream_to_play = url
+def pad_box_line(content: str, width: int = 74) -> str:
+    """Pad content inside a styled terminal box border preserving exact alignment."""
+    dw = str_display_width(content)
+    pad = max(0, width - 4 - dw)
+    return f"{C_CYAN}│{C_RESET}  {content}" + " " * pad + f"{C_CYAN}│{C_RESET}"
 
-    if is_hls:
-        try:
-            raw_m3u8 = curl_get(url, referer=referer, timeout=10)
-            if not raw_m3u8:
-                log_warn("Gagal mengunduh daftar putar m3u8.")
-                return False
-            fixed_bytes = fix_m3u8_content(raw_m3u8, url)
+def render_player_dashboard(title: str, quality_label: str = ""):
+    """Render an elegant, modern player dashboard with full keyboard control guide."""
+    width = 74
+    clean_title = re.sub(r'[\r\n]+', ' ', title).strip()
+    if str_display_width(clean_title) > width - 12:
+        clean_title = clean_title[:width - 15] + "..."
 
-            class LocalM3U8Handler(BaseHTTPRequestHandler):
-                def do_GET(self):
-                    self.send_response(200)
-                    self.send_header("Content-Type", "application/vnd.apple.mpegurl")
-                    self.send_header("Content-Length", str(len(fixed_bytes)))
-                    self.send_header("Access-Control-Allow-Origin", "*")
-                    self.end_headers()
-                    self.wfile.write(fixed_bytes)
-                def log_message(self, format, *args):
-                    pass
+    meta = f"Kualitas: {quality_label}" if quality_label else ""
+    if str_display_width(meta) > width - 12:
+        meta = meta[:width - 15] + "..."
 
-            server = HTTPServer(("127.0.0.1", 0), LocalM3U8Handler)
-            port = server.server_address[1]
-            threading.Thread(target=server.serve_forever, daemon=True).start()
-            stream_to_play = f"http://127.0.0.1:{port}/stream.m3u8"
-        except Exception as e:
-            log_warn(f"Gagal menyiapkan pemutar HLS lokal: {e}")
-            return False
+    lines = [
+        f"{C_CYAN}╭{'─' * (width - 2)}╮{C_RESET}",
+        pad_box_line(f"🎬 {C_BOLD}{clean_title}{C_RESET}", width),
+    ]
+    if meta:
+        lines.append(pad_box_line(f"📺 {C_BLUE}{meta}{C_RESET}", width))
+    lines.extend([
+        f"{C_CYAN}├{'─' * (width - 2)}┤{C_RESET}",
+        pad_box_line(f"{C_BOLD}⌨️  PETUNJUK KONTROL KEYBOARD:{C_RESET}", width),
+        pad_box_line("", width),
+        pad_box_line(f"{C_GREEN}[Spasi]{C_RESET}       Jeda / Lanjutkan (Play / Pause)", width),
+        pad_box_line(f"{C_GREEN}[N] / [>]{C_RESET}     Lompat ke Episode Berikutnya (Next)", width),
+        pad_box_line(f"{C_GREEN}[P] / [<]{C_RESET}     Kembali ke Episode Sebelumnya (Prev)", width),
+        pad_box_line(f"{C_GREEN}[←] / [→]{C_RESET}     Mundur / Maju 5 Detik", width),
+        pad_box_line(f"{C_GREEN}[↓] / [↑]{C_RESET}     Mundur / Maju 60 Detik", width),
+        pad_box_line(f"{C_GREEN}[9] / [0]{C_RESET}     Kurangi / Tambah Volume (-/+ 2%)", width),
+        pad_box_line(f"{C_GREEN}[M]{C_RESET}           Bisukan Suara (Mute / Unmute)", width),
+        pad_box_line(f"{C_GREEN}[F]{C_RESET}           Layar Penuh (Toggle Fullscreen)", width),
+        pad_box_line(f"{C_GREEN}[S]{C_RESET}           Ambil Tangkapan Layar (Screenshot)", width),
+        pad_box_line(f"{C_GREEN}[?] / [H]{C_RESET}     Tampilkan Bantuan di Layar Video (OSD)", width),
+        pad_box_line(f"{C_GREEN}[Q]{C_RESET}           Tutup Pemutar & Buka Menu Navigasi", width),
+        f"{C_CYAN}╰{'─' * (width - 2)}╯{C_RESET}",
+    ])
+    print()
+    for l in lines:
+        print(l)
+    print()
 
 def format_time(seconds):
     """Format seconds into HH:MM:SS or MM:SS."""
@@ -1121,17 +1147,38 @@ def play_video(url, title, quality_label="", referer=None, is_hls=False, start_p
     except Exception:
         pass
 
-    # Temporary input.conf for in-player hotkeys (N: next episode, P: prev episode)
+    # Render modern, elegant terminal player dashboard
+    if sys.stdout.isatty():
+        render_player_dashboard(title, quality_label)
+
+    # Temporary input.conf for in-player hotkeys & on-screen OSD cheat-sheet
     input_conf_file = Path(f"/tmp/anindo-input-{os.getpid()}.conf")
+    help_osd = (
+        "══ PANDUAN KONTROL ANINDO ══\\n"
+        "[Spasi]   : Jeda / Putar (Play/Pause)\\n"
+        "[N] / [>] : Episode Berikutnya\\n"
+        "[P] / [<] : Episode Sebelumnya\\n"
+        "[←] / [→] : Mundur / Maju 5s\\n"
+        "[↓] / [↑] : Mundur / Maju 60s\\n"
+        "[9] / [0] : Volume - / + (2%)\\n"
+        "[M]       : Bisukan Suara (Mute/Unmute)\\n"
+        "[F]       : Layar Penuh (Fullscreen)\\n"
+        "[S]       : Tangkapan Layar (Screenshot)\\n"
+        "[Q]       : Keluar ke Menu Navigasi"
+    )
     try:
         with open(input_conf_file, "w", encoding="utf-8") as f:
             f.write(
-                "n quit 2\n"
-                "N quit 2\n"
-                "> quit 2\n"
-                "p quit 3\n"
-                "P quit 3\n"
-                "< quit 3\n"
+                f"n quit 2\n"
+                f"N quit 2\n"
+                f"> quit 2\n"
+                f"p quit 3\n"
+                f"P quit 3\n"
+                f"< quit 3\n"
+                f"? show-text \"{help_osd}\" 7000\n"
+                f"h show-text \"{help_osd}\" 7000\n"
+                f"H show-text \"{help_osd}\" 7000\n"
+                f"F1 show-text \"{help_osd}\" 7000\n"
             )
     except Exception:
         input_conf_file = None
@@ -1150,8 +1197,8 @@ def play_video(url, title, quality_label="", referer=None, is_hls=False, start_p
         mpv_cmd.append(f"--input-conf={input_conf_file}")
 
     clean_osd_title = re.sub(r'[\r\n]+', ' ', title)
-    mpv_cmd.append(f"--osd-playing-msg=[anindo] {clean_osd_title}\\n[N / >] Episode Berikutnya  |  [P / <] Episode Sebelumnya  |  [Q] Menu")
-    mpv_cmd.append("--osd-playing-msg-duration=4000")
+    mpv_cmd.append(f"--osd-playing-msg=[anindo] {clean_osd_title}\\n[N] Next  |  [P] Prev  |  [Spasi] Pause  |  [?] Bantuan Keyboard  |  [Q] Menu")
+    mpv_cmd.append("--osd-playing-msg-duration=5000")
 
     # Append custom user flags from ~/.config/anindo/config.json
     user_flags = USER_CONFIG.get("mpv_flags", [])
@@ -1171,7 +1218,7 @@ def play_video(url, title, quality_label="", referer=None, is_hls=False, start_p
 
     mpv_cmd.append(stream_to_play)
 
-    playback_state = {"time_pos": 0.0, "percent": 0.0, "duration": 0.0}
+    playback_state = {"time_pos": 0.0, "percent": 0.0, "duration": 0.0, "pause": False}
     stop_event = threading.Event()
 
     def monitor_ipc():
@@ -1226,6 +1273,41 @@ def play_video(url, title, quality_label="", referer=None, is_hls=False, start_p
                                 playback_state["duration"] = d["data"]
                         except Exception:
                             pass
+
+                # Query pause state
+                s.sendall(b'{"command": ["get_property", "pause"]}\n')
+                res = s.recv(1024).decode("utf-8", "ignore")
+                for line in res.strip().split("\n"):
+                    if line:
+                        try:
+                            d = json.loads(line)
+                            if isinstance(d.get("data"), bool):
+                                playback_state["pause"] = d["data"]
+                        except Exception:
+                            pass
+
+                # Render dynamic progress line in terminal
+                if sys.stdout.isatty():
+                    cur_t = playback_state.get("time_pos", 0.0)
+                    dur_t = playback_state.get("duration", 0.0)
+                    pct = playback_state.get("percent", 0.0)
+                    is_paused = playback_state.get("pause", False)
+
+                    status_tag = f"{C_YELLOW}⏸ JEDA {C_RESET}" if is_paused else f"{C_GREEN}▶ PUTAR{C_RESET}"
+                    cur_s = format_time(cur_t)
+                    dur_s = format_time(dur_t) if dur_t > 0 else "--:--"
+
+                    bar_len = 16
+                    filled = min(bar_len, max(0, int(round((pct / 100.0) * bar_len))))
+                    bar = "━" * filled + ("╸" if filled < bar_len else "") + "─" * max(0, bar_len - 1 - filled)
+
+                    progress_line = (
+                        f"\r  {status_tag} [{cur_s} / {dur_s}] ❲{bar}❳ {pct:5.1f}%  "
+                        f"{C_GRAY}• Tekan '?' di pemutar untuk bantuan OSD{C_RESET}   "
+                    )
+                    sys.stdout.write(progress_line)
+                    sys.stdout.flush()
+
             except Exception:
                 break
             time.sleep(0.5)
@@ -1238,12 +1320,18 @@ def play_video(url, title, quality_label="", referer=None, is_hls=False, start_p
     ipc_thread.start()
 
     try:
-        proc = subprocess.Popen(mpv_cmd)
+        if os.environ.get("ANINDO_DEBUG") == "1":
+            proc = subprocess.Popen(mpv_cmd)
+        else:
+            proc = subprocess.Popen(mpv_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         proc.wait()
         ret_code = proc.returncode
     except KeyboardInterrupt:
         ret_code = 0
     finally:
+        if sys.stdout.isatty():
+            sys.stdout.write("\r" + " " * 85 + "\r\n")
+            sys.stdout.flush()
         stop_event.set()
         ipc_thread.join(timeout=0.5)
         try:

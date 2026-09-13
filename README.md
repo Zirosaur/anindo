@@ -134,11 +134,24 @@ anindo "solo leveling" -e all -d     # Unduh semua episode dalam seri
 ```
 *Secara bawaan berkas tersimpan di `~/Downloads/Anime` (dapat diubah via menu pengaturan interaktif atau config).*
 
-### 5. Navigasi & Kontrol Pemutar Saat Streaming
-Saat jendela MPV sedang memutar video, kamu dapat menavigasi episode secara instan:
-- **`N`** atau **`>`**: Lompat langsung ke **Episode Berikutnya**
-- **`P`** atau **`<`**: Kembali ke **Episode Sebelumnya**
-- **`Q`**: Menutup pemutar dan membuka **Menu Navigasi Pemutar Interaktif** (Lanjutkan dari menit terakhir, Episode Berikutnya/Sebelumnya, Putar Ulang, atau Pilih Episode Lain).
+### 5. Navigasi, Dashboard & Kontrol Pemutar Saat Streaming
+Saat memutar video, `anindo` menghadirkan pengalaman pemutar modern dan informatif:
+
+- **Dashboard Terminal & Live Progress**:
+  Terminal menampilkan kartu ringkasan anime aktif dan tabel panduan keyboard yang rapi, disertai progress bar waktu nyata `▶ PUTAR [03:45 / 24:10] ❲━━━━╸───────────────❳  15.5%` tanpa gangguan log teknis decoder.
+- **Overlay Bantuan di Layar Video (In-Player OSD Cheat-Sheet)**:
+  Tekan **`?`**, **`H`**, atau **`F1`** di jendela video untuk memunculkan petunjuk fungsi keyboard langsung di atas video (sangat praktis saat mode *Fullscreen*).
+- **Pintasan Keyboard Utama**:
+  - **`Spasi`**: Jeda / Lanjutkan pemutaran (*Play / Pause*)
+  - **`N`** atau **`>`**: Lompat langsung ke **Episode Berikutnya**
+  - **`P`** atau **`<`**: Kembali ke **Episode Sebelumnya**
+  - **`←` / `→`**: Mundur / Maju 5 detik
+  - **`↓` / `↑`**: Mundur / Maju 60 detik
+  - **`9` / `0`**: Kurangi / Tambah volume suara
+  - **`M`**: Bisukan suara (*Mute / Unmute*)
+  - **`F`**: Mode layar penuh (*Toggle Fullscreen*)
+  - **`S`**: Ambil tangkapan layar (*Screenshot*)
+  - **`Q`**: Menutup pemutar dan membuka **Menu Navigasi Pemutar Interaktif** (Lanjutkan dari menit terakhir, Episode Berikutnya/Sebelumnya, Putar Ulang, atau Pilih Episode Lain).
 
 ### 6. Tonton Anime On-Going Terbaru
 ```bash
