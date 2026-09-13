@@ -12,6 +12,7 @@ import html
 import json
 import base64
 import shlex
+import shutil
 import argparse
 import subprocess
 import urllib.parse
@@ -1031,7 +1032,7 @@ def str_display_width(s: str) -> int:
             w += 1
     return w
 
-def pad_box_line(content: str, width: int = 74) -> str:
+def pad_box_line(content: str, width: int = 70) -> str:
     """Pad content inside a styled terminal box border preserving exact alignment."""
     dw = str_display_width(content)
     pad = max(0, width - 4 - dw)
@@ -1039,14 +1040,15 @@ def pad_box_line(content: str, width: int = 74) -> str:
 
 def render_player_dashboard(title: str, quality_label: str = ""):
     """Render an elegant, modern player dashboard with full keyboard control guide."""
-    width = 74
+    cols = shutil.get_terminal_size((80, 24)).columns
+    width = min(70, max(60, cols - 2))
     clean_title = re.sub(r'[\r\n]+', ' ', title).strip()
-    if str_display_width(clean_title) > width - 12:
-        clean_title = clean_title[:width - 15] + "..."
+    if str_display_width(clean_title) > width - 10:
+        clean_title = clean_title[:width - 13] + "..."
 
     meta = f"Kualitas: {quality_label}" if quality_label else ""
-    if str_display_width(meta) > width - 12:
-        meta = meta[:width - 15] + "..."
+    if str_display_width(meta) > width - 10:
+        meta = meta[:width - 13] + "..."
 
     lines = [
         f"{C_CYAN}╭{'─' * (width - 2)}╮{C_RESET}",
@@ -1236,6 +1238,7 @@ def play_video(url, title, quality_label="", referer=None, is_hls=False, start_p
         if not s:
             return
 
+        last_rendered = None
         while not stop_event.is_set():
             try:
                 # Query percent-pos
@@ -1286,7 +1289,7 @@ def play_video(url, title, quality_label="", referer=None, is_hls=False, start_p
                         except Exception:
                             pass
 
-                # Render dynamic progress line in terminal
+                # Render dynamic progress line cleanly on a single line
                 if sys.stdout.isatty():
                     cur_t = playback_state.get("time_pos", 0.0)
                     dur_t = playback_state.get("duration", 0.0)
@@ -1301,12 +1304,16 @@ def play_video(url, title, quality_label="", referer=None, is_hls=False, start_p
                     filled = min(bar_len, max(0, int(round((pct / 100.0) * bar_len))))
                     bar = "━" * filled + ("╸" if filled < bar_len else "") + "─" * max(0, bar_len - 1 - filled)
 
-                    progress_line = (
-                        f"\r  {status_tag} [{cur_s} / {dur_s}] ❲{bar}❳ {pct:5.1f}%  "
-                        f"{C_GRAY}• Tekan '?' di pemutar untuk bantuan OSD{C_RESET}   "
-                    )
-                    sys.stdout.write(progress_line)
-                    sys.stdout.flush()
+                    progress_line = f"  {status_tag} [{cur_s} / {dur_s}] ❲{bar}❳ {pct:5.1f}%"
+                    cols = shutil.get_terminal_size((80, 24)).columns
+                    if str_display_width(progress_line) >= cols:
+                        progress_line = f"  {status_tag} [{cur_s}/{dur_s}] {pct:4.0f}%"
+
+                    rendered_key = (cur_s, is_paused)
+                    if rendered_key != last_rendered:
+                        last_rendered = rendered_key
+                        sys.stdout.write(f"\r\033[K{progress_line}")
+                        sys.stdout.flush()
 
             except Exception:
                 break
@@ -1330,7 +1337,7 @@ def play_video(url, title, quality_label="", referer=None, is_hls=False, start_p
         ret_code = 0
     finally:
         if sys.stdout.isatty():
-            sys.stdout.write("\r" + " " * 85 + "\r\n")
+            sys.stdout.write("\r\033[K\n")
             sys.stdout.flush()
         stop_event.set()
         ipc_thread.join(timeout=0.5)
