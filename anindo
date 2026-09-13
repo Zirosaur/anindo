@@ -1802,6 +1802,12 @@ def interactive_settings_menu():
             save_user_config(USER_CONFIG)
             log_success("Pengaturan berhasil direset ke nilai default!")
 
+def print_banner():
+    """Print the anindo CLI banner."""
+    print(f"{C_CYAN}{C_BOLD}╔══════════════════════════════════════════════════╗{C_RESET}")
+    print(f"{C_CYAN}{C_BOLD}║      anindo - Anime Subtitle Indonesia CLI       ║{C_RESET}")
+    print(f"{C_CYAN}{C_BOLD}╚══════════════════════════════════════════════════╝{C_RESET}\n")
+
 def main():
     global USER_CONFIG
     USER_CONFIG = load_user_config()
@@ -1833,20 +1839,17 @@ def main():
     norm_quality = chosen_quality.lower().rstrip("p")
     chosen_provider = args.provider or USER_CONFIG.get("default_provider", "all")
 
-    # Print banner
-    print(f"{C_CYAN}{C_BOLD}╔══════════════════════════════════════════════════╗{C_RESET}")
-    print(f"{C_CYAN}{C_BOLD}║      anindo - Anime Subtitle Indonesia CLI       ║{C_RESET}")
-    print(f"{C_CYAN}{C_BOLD}╚══════════════════════════════════════════════════╝{C_RESET}\n")
-
     if args.settings:
         interactive_settings_menu()
         return
 
     if args.update:
+        print_banner()
         check_and_self_update()
         return
 
     if args.update_domains:
+        print_banner()
         log_info("Memeriksa dan menyegarkan domain penyedia anime...")
         if DOMAINS_CACHE_FILE.exists():
             try:
@@ -1857,12 +1860,8 @@ def main():
             domain = get_base_url(p.name, force_refresh=True)
             log_success(f"{p.display_name:<16}: {domain}")
         return
-
-    selected_anime = None
-    target_ep_num = None
-    initial_start_pos = 0
-
     if args.history:
+        print_banner()
         hist = load_history()
         if not hist:
             print("Belum ada riwayat tontonan.")
@@ -1878,415 +1877,338 @@ def main():
             print(f" {i:2d}. {h['anime_title']}{prov_tag} - {h['last_ep_title']}{prog}{date_info}")
         return
 
-    if args.ongoing:
-        ongoing_list = get_ongoing_anime()
-        if not ongoing_list:
-            log_err("Gagal mengambil daftar anime ongoing.")
-            return
-        selected_anime = fzf_select(ongoing_list, prompt="Pilih Anime Ongoing: ", display_fn=lambda x: x["title"])
-    elif args.continue_watch:
-        hist = load_history()
-        if not hist:
-            log_warn("Tidak ada riwayat tontonan untuk dilanjutkan.")
-            return
+    first_run = True
+    initial_query = args.query
+    initial_ongoing = args.ongoing
+    initial_continue = args.continue_watch
+    initial_episode_spec = args.episode
 
-        def format_hist_choice(x):
-            p = f" [Dijeda di {format_time(x['time_pos'])} - {x.get('percent',0)}%]" if x.get("status") == "in_progress" and x.get("time_pos", 0) > 0 else " (Selesai)"
-            d = f" [{x.get('date_str','')}]" if x.get("date_str") else ""
-            return f"{x['anime_title']} - {x['last_ep_title']}{p}{d}"
+    try:
+        while True:
+            chosen_quality = args.quality or USER_CONFIG.get("default_quality", "best")
+            norm_quality = chosen_quality.lower().rstrip("p")
+            chosen_provider = args.provider or USER_CONFIG.get("default_provider", "all")
 
-        choice = fzf_select(hist, prompt="Lanjutkan Anime: ", display_fn=format_hist_choice)
-        if not choice:
-            return
-        selected_anime = {
-            "title": choice["anime_title"],
-            "url": choice["anime_url"],
-            "provider": choice.get("provider", "otakudesu")
-        }
-        ep_n = choice.get("last_ep_num", 1)
-        if choice.get("status") == "in_progress" and choice.get("time_pos", 0) > 0:
-            target_ep_num = ep_n
-            initial_start_pos = choice["time_pos"]
-        elif choice.get("status") == "completed":
-            target_ep_num = (int(ep_n) if isinstance(ep_n, float) and ep_n.is_integer() else ep_n) + 1
+            selected_anime = None
+            target_ep_num = None
             initial_start_pos = 0
-        else:
-            target_ep_num = ep_n
-            initial_start_pos = 0
-    else:
-        query = args.query
-        if not query:
-            hist = load_history()
-            menu_items = []
-            if hist:
-                latest = hist[0]
-                ep_n = latest.get("last_ep_num", 1)
-                ep_str = str(int(ep_n)) if isinstance(ep_n, float) and ep_n.is_integer() else str(ep_n)
-                status = latest.get("status", "completed")
-                time_pos = latest.get("time_pos", 0)
-                percent = latest.get("percent", 0)
 
-                if status == "in_progress" and time_pos > 0:
-                    time_str = format_time(time_pos)
-                    target_num = ep_n
-                    start_time = time_pos
-                    auto_title = f"▶ [Lanjut Nonton] {latest['anime_title']} - Episode {ep_str} [Lanjut di {time_str}] ({percent}%)"
-                elif status == "completed":
-                    next_n = (int(ep_n) if isinstance(ep_n, float) and ep_n.is_integer() else ep_n) + 1
-                    next_str = str(int(next_n)) if isinstance(next_n, float) and next_n.is_integer() else str(next_n)
-                    target_num = next_n
-                    start_time = 0
-                    auto_title = f"▶ [Lanjut Nonton] {latest['anime_title']} - Episode {next_str} (Selesai Ep {ep_str})"
-                else:
-                    target_num = ep_n
-                    start_time = 0
-                    auto_title = f"▶ [Lanjut Nonton] {latest['anime_title']} - Episode {ep_str}"
+            if first_run and (initial_query or initial_ongoing or initial_continue):
+                first_run = False
+                print_banner()
+                if initial_ongoing:
+                    ongoing_list = get_ongoing_anime()
+                    if not ongoing_list:
+                        log_err("Gagal mengambil daftar anime ongoing.")
+                        if args.download:
+                            return
+                        time.sleep(1.5)
+                        continue
+                    selected_anime = fzf_select(ongoing_list, prompt="Pilih Anime Ongoing (ESC untuk kembali): ", display_fn=lambda x: x["title"])
+                    if not selected_anime:
+                        if args.download:
+                            return
+                        continue
+                elif initial_continue:
+                    hist = load_history()
+                    if not hist:
+                        log_warn("Tidak ada riwayat tontonan untuk dilanjutkan.")
+                        if args.download:
+                            return
+                        time.sleep(1.5)
+                        continue
 
-                menu_items.append({
-                    "action": "auto_resume",
-                    "title": auto_title,
-                    "item": latest,
-                    "target_ep": target_num,
-                    "start_time": start_time
-                })
+                    def format_hist_choice(x):
+                        p = f" [Dijeda di {format_time(x['time_pos'])} - {x.get('percent',0)}%]" if x.get("status") == "in_progress" and x.get("time_pos", 0) > 0 else " (Selesai)"
+                        d = f" [{x.get('date_str','')}]" if x.get("date_str") else ""
+                        return f"{x['anime_title']} - {x['last_ep_title']}{p}{d}"
 
-            menu_items.extend([
-                {"action": "search", "title": "🔍 Cari Anime (Semua Koleksi + Lawas)"},
-                {"action": "ongoing", "title": "🔥 Anime On-Going Terbaru"},
-                {"action": "history", "title": "🕒 Riwayat Tontonan Lengkap..."},
-                {"action": "settings", "title": "⚙️ Pengaturan (Lokasi Unduhan, Kualitas, dll.)"}
-            ])
+                    choice = fzf_select(hist, prompt="Lanjutkan Anime (ESC untuk kembali): ", display_fn=format_hist_choice)
+                    if not choice:
+                        if args.download:
+                            return
+                        continue
+                    selected_anime = {
+                        "title": choice["anime_title"],
+                        "url": choice["anime_url"],
+                        "provider": choice.get("provider", "otakudesu")
+                    }
+                    ep_n = choice.get("last_ep_num", 1)
+                    if choice.get("status") == "in_progress" and choice.get("time_pos", 0) > 0:
+                        target_ep_num = ep_n
+                        initial_start_pos = choice["time_pos"]
+                    elif choice.get("status") == "completed":
+                        target_ep_num = (int(ep_n) if isinstance(ep_n, float) and ep_n.is_integer() else ep_n) + 1
+                        initial_start_pos = 0
+                    else:
+                        target_ep_num = ep_n
+                        initial_start_pos = 0
+                elif initial_query:
+                    results = search_anime(initial_query, provider=chosen_provider)
+                    if not results:
+                        log_err(f"Anime '{initial_query}' tidak ditemukan di penyedia manapun.")
+                        if args.download:
+                            return
+                        time.sleep(1.5)
+                        continue
+                    selected_anime = fzf_select(results, prompt="Pilih Anime (ESC untuk kembali): ", display_fn=lambda x: x["title"])
+                    if not selected_anime:
+                        if args.download:
+                            return
+                        continue
 
-            menu_pick = fzf_select(menu_items, prompt="Menu Utama: ", display_fn=lambda x: x["title"])
-            if not menu_pick:
-                return
-
-            if menu_pick["action"] == "auto_resume":
-                item = menu_pick["item"]
-                selected_anime = {
-                    "title": item["anime_title"],
-                    "url": item["anime_url"],
-                    "provider": item.get("provider", "otakudesu")
-                }
-                target_ep_num = menu_pick["target_ep"]
-                initial_start_pos = menu_pick["start_time"]
-            elif menu_pick["action"] == "ongoing":
-                ongoing_list = get_ongoing_anime()
-                selected_anime = fzf_select(ongoing_list, prompt="Pilih Anime Ongoing: ", display_fn=lambda x: x["title"])
-            elif menu_pick["action"] == "settings":
-                interactive_settings_menu()
-                return
-            elif menu_pick["action"] == "history":
-                if not hist:
-                    log_warn("Belum ada riwayat tontonan.")
-                    return
-
-                def format_hist_entry(x):
-                    p = f" [Dijeda di {format_time(x['time_pos'])} - {x.get('percent',0)}%]" if x.get("status") == "in_progress" and x.get("time_pos", 0) > 0 else " (Selesai)"
-                    d = f" [{x.get('date_str','')}]" if x.get("date_str") else ""
-                    return f"{x['anime_title']} - {x['last_ep_title']}{p}{d}"
-
-                choice = fzf_select(hist, prompt="Pilih Riwayat Anime: ", display_fn=format_hist_entry)
-                if not choice:
-                    return
-                selected_anime = {
-                    "title": choice["anime_title"],
-                    "url": choice["anime_url"],
-                    "provider": choice.get("provider", "otakudesu")
-                }
-                ep_n = choice.get("last_ep_num", 1)
-                if choice.get("status") == "in_progress" and choice.get("time_pos", 0) > 0:
-                    target_ep_num = ep_n
-                    initial_start_pos = choice["time_pos"]
-                elif choice.get("status") == "completed":
-                    target_ep_num = (int(ep_n) if isinstance(ep_n, float) and ep_n.is_integer() else ep_n) + 1
-                    initial_start_pos = 0
-                else:
-                    target_ep_num = ep_n
-                    initial_start_pos = 0
             else:
-                try:
-                    query = input(f"{C_BOLD}Ketik judul anime: {C_RESET}").strip()
-                except (EOFError, KeyboardInterrupt):
+                first_run = False
+                if sys.stdout.isatty():
+                    clear_screen()
+                print_banner()
+
+                hist = load_history()
+                menu_items = []
+                if hist:
+                    latest = hist[0]
+                    ep_n = latest.get("last_ep_num", 1)
+                    ep_str = str(int(ep_n)) if isinstance(ep_n, float) and ep_n.is_integer() else str(ep_n)
+                    status = latest.get("status", "completed")
+                    time_pos = latest.get("time_pos", 0)
+                    percent = latest.get("percent", 0)
+
+                    if status == "in_progress" and time_pos > 0:
+                        time_str = format_time(time_pos)
+                        target_num = ep_n
+                        start_time = time_pos
+                        auto_title = f"▶ [Lanjut Nonton] {latest['anime_title']} - Episode {ep_str} [Lanjut di {time_str}] ({percent}%)"
+                    elif status == "completed":
+                        next_n = (int(ep_n) if isinstance(ep_n, float) and ep_n.is_integer() else ep_n) + 1
+                        next_str = str(int(next_n)) if isinstance(next_n, float) and next_n.is_integer() else str(next_n)
+                        target_num = next_n
+                        start_time = 0
+                        auto_title = f"▶ [Lanjut Nonton] {latest['anime_title']} - Episode {next_str} (Selesai Ep {ep_str})"
+                    else:
+                        target_num = ep_n
+                        start_time = 0
+                        auto_title = f"▶ [Lanjut Nonton] {latest['anime_title']} - Episode {ep_str}"
+
+                    menu_items.append({
+                        "action": "auto_resume",
+                        "title": auto_title,
+                        "item": latest,
+                        "target_ep": target_num,
+                        "start_time": start_time
+                    })
+
+                menu_items.extend([
+                    {"action": "search", "title": "🔍 Cari Anime (Semua Koleksi + Lawas)"},
+                    {"action": "ongoing", "title": "🔥 Anime On-Going Terbaru"},
+                    {"action": "history", "title": "🕒 Riwayat Tontonan Lengkap..."},
+                    {"action": "settings", "title": "⚙️ Pengaturan (Lokasi Unduhan, Kualitas, dll.)"},
+                    {"action": "exit", "title": "❌ Keluar dari anindo"}
+                ])
+
+                menu_pick = fzf_select(menu_items, prompt="Menu Utama: ", display_fn=lambda x: x["title"])
+                if not menu_pick or menu_pick["action"] == "exit":
+                    if sys.stdout.isatty():
+                        clear_screen()
+                    print(f"{C_CYAN}[anindo]{C_RESET} {C_GREEN}Terima kasih telah menonton bersama anindo! Sampai jumpa.{C_RESET}\n")
                     return
-                if not query:
+
+                if menu_pick["action"] == "auto_resume":
+                    item = menu_pick["item"]
+                    selected_anime = {
+                        "title": item["anime_title"],
+                        "url": item["anime_url"],
+                        "provider": item.get("provider", "otakudesu")
+                    }
+                    target_ep_num = menu_pick["target_ep"]
+                    initial_start_pos = menu_pick["start_time"]
+                elif menu_pick["action"] == "ongoing":
+                    ongoing_list = get_ongoing_anime()
+                    if not ongoing_list:
+                        log_err("Gagal mengambil daftar anime ongoing.")
+                        time.sleep(1.5)
+                        continue
+                    selected_anime = fzf_select(ongoing_list, prompt="Pilih Anime Ongoing (ESC untuk kembali): ", display_fn=lambda x: x["title"])
+                    if not selected_anime:
+                        continue
+                elif menu_pick["action"] == "settings":
+                    interactive_settings_menu()
+                    continue
+                elif menu_pick["action"] == "history":
+                    if not hist:
+                        log_warn("Belum ada riwayat tontonan.")
+                        time.sleep(1.5)
+                        continue
+
+                    def format_hist_entry(x):
+                        p = f" [Dijeda di {format_time(x['time_pos'])} - {x.get('percent',0)}%]" if x.get("status") == "in_progress" and x.get("time_pos", 0) > 0 else " (Selesai)"
+                        d = f" [{x.get('date_str','')}]" if x.get("date_str") else ""
+                        return f"{x['anime_title']} - {x['last_ep_title']}{p}{d}"
+
+                    choice = fzf_select(hist, prompt="Pilih Riwayat Anime (ESC untuk kembali): ", display_fn=format_hist_entry)
+                    if not choice:
+                        continue
+                    selected_anime = {
+                        "title": choice["anime_title"],
+                        "url": choice["anime_url"],
+                        "provider": choice.get("provider", "otakudesu")
+                    }
+                    ep_n = choice.get("last_ep_num", 1)
+                    if choice.get("status") == "in_progress" and choice.get("time_pos", 0) > 0:
+                        target_ep_num = ep_n
+                        initial_start_pos = choice["time_pos"]
+                    elif choice.get("status") == "completed":
+                        target_ep_num = (int(ep_n) if isinstance(ep_n, float) and ep_n.is_integer() else ep_n) + 1
+                        initial_start_pos = 0
+                    else:
+                        target_ep_num = ep_n
+                        initial_start_pos = 0
+                elif menu_pick["action"] == "search":
+                    try:
+                        query = input(f"\n{C_BOLD}Ketik judul anime (Enter kosong untuk kembali): {C_RESET}").strip()
+                    except (EOFError, KeyboardInterrupt):
+                        continue
+                    if not query:
+                        continue
+                    results = search_anime(query, provider=chosen_provider)
+                    if not results:
+                        log_err(f"Anime '{query}' tidak ditemukan di penyedia manapun.")
+                        time.sleep(1.5)
+                        continue
+                    selected_anime = fzf_select(results, prompt="Pilih Anime (ESC untuk kembali): ", display_fn=lambda x: x["title"])
+                    if not selected_anime:
+                        continue
+
+            if not selected_anime:
+                continue
+
+            clean_disp_title = selected_anime.get("raw_title", selected_anime["title"])
+            prov_obj = REGISTRY.get(selected_anime.get("provider"))
+            prov_display = prov_obj.display_name if prov_obj else "Unknown"
+            log_success(f"Memilih: {clean_disp_title} ({prov_display})")
+
+            episodes = get_anime_details(selected_anime)
+            if not episodes:
+                log_err("Tidak dapat menemukan daftar episode untuk anime ini.")
+                if args.download:
                     return
-                results = search_anime(query, provider=chosen_provider)
-                if not results:
-                    log_err(f"Anime '{query}' tidak ditemukan di penyedia manapun.")
-                    return
-                selected_anime = fzf_select(results, prompt="Pilih Anime: ", display_fn=lambda x: x["title"])
-        else:
-            results = search_anime(query, provider=chosen_provider)
-            if not results:
-                log_err(f"Anime '{query}' tidak ditemukan di penyedia manapun.")
-                return
-            selected_anime = fzf_select(results, prompt="Pilih Anime: ", display_fn=lambda x: x["title"])
+                time.sleep(1.5)
+                continue
 
-    if not selected_anime:
-        return
-
-    clean_disp_title = selected_anime.get("raw_title", selected_anime["title"])
-    prov_obj = REGISTRY.get(selected_anime.get("provider"))
-    prov_display = prov_obj.display_name if prov_obj else "Unknown"
-    log_success(f"Memilih: {clean_disp_title} ({prov_display})")
-
-    episodes = get_anime_details(selected_anime)
-    if not episodes:
-        log_err("Tidak dapat menemukan daftar episode untuk anime ini.")
-        return
-
-    # Candidate ranking function by quality score & server reliability
-    def score_candidate(c):
-        s = 0
-        q = c["quality"]
-        if norm_quality != "best":
-            if norm_quality in q:
-                s += 1000
-            elif norm_quality == "1080":
-                if "720" in q: s += 800
-                elif "480" in q: s += 500
-                elif "360" in q: s += 200
-            elif norm_quality == "720":
-                if "480" in q: s += 800
-                elif "360" in q: s += 500
-                elif "1080" in q: s += 300
-            elif norm_quality == "480":
-                if "360" in q: s += 800
-                elif "720" in q: s += 500
-                elif "1080" in q: s += 200
-            elif norm_quality == "360":
-                if "480" in q: s += 800
-                elif "720" in q: s += 500
-        else:
-            if "1080" in q: s += 300
-            elif "720" in q or "adaptive" in q.lower() or "hd" in q.lower(): s += 200
-            elif "480" in q: s += 100
-            elif "360" in q: s += 50
-
-        srv = c["server"].lower()
-        if "putarin" in srv or "hls" in srv: s += 30
-        elif "filedon" in srv: s += 25
-        elif "pixeldrain" in srv: s += 20
-        elif "yourupload" in srv: s += 18
-        elif "odcloud" in srv: s += 15
-        else: s += 5
-        return s
-
-    # Determine target episodes (Single or Batch Range)
-    target_episodes = []
-    is_batch_mode = False
-
-    if args.episode:
-        target_episodes = parse_episode_spec(args.episode, episodes)
-        if not target_episodes:
-            log_warn(f"Episode '{args.episode}' tidak cocok dengan daftar episode yang tersedia.")
-    elif target_ep_num is not None:
-        matched = [ep for ep in episodes if ep["ep_num"] == target_ep_num]
-        if matched:
-            target_episodes = matched
-        else:
-            log_warn(f"Episode {target_ep_num} tidak ditemukan, silakan pilih manual.")
-
-    if not target_episodes:
-        if args.download and len(episodes) > 1:
-            batch_choice = {"title": f"📦 [Unduh Semua Episode (Batch - {len(episodes)} Episode)]", "is_batch": True}
-            choice_items = [batch_choice] + episodes
-            picked = fzf_select(choice_items, prompt="Pilih Episode untuk Diunduh: ", display_fn=lambda x: x["title"])
-            if not picked:
-                return
-            if picked.get("is_batch"):
-                target_episodes = list(episodes)
-            else:
-                target_episodes = [picked]
-        else:
-            selected_ep = fzf_select(episodes, prompt="Pilih Episode: ", display_fn=lambda x: x["title"])
-            if not selected_ep:
-                return
-            target_episodes = [selected_ep]
-
-    if len(target_episodes) > 1:
-        is_batch_mode = True
-
-    # --------------------------------------------------------------------------
-    # MODE 1: DOWNLOAD ENGINE (Batch or Single)
-    # --------------------------------------------------------------------------
-    if args.download:
-        total_dl = len(target_episodes)
-        log_info(f"Memulai pengunduhan {total_dl} episode...")
-
-        for idx, ep in enumerate(target_episodes, 1):
-            log_info(f"\n{C_BOLD}[{idx}/{total_dl}] Memproses {ep['title']}...{C_RESET}")
-            candidates = extract_stream_candidates(ep)
-
-            # Cross-Provider Fallback if no stream candidates found on current provider
-            if not candidates:
-                log_warn(f"Server tidak ditemukan di {prov_display} untuk {ep['title']}.")
-                matched_alt_ep, alt_cands = REGISTRY.find_cross_provider_fallback(clean_disp_title, ep["ep_num"], selected_anime["provider"])
-                if alt_cands:
-                    candidates = alt_cands
-                    ep = matched_alt_ep or ep
+            # Candidate ranking function by quality score & server reliability
+            def score_candidate(c):
+                s = 0
+                q = c["quality"]
+                if norm_quality != "best":
+                    if norm_quality in q:
+                        s += 1000
+                    elif norm_quality == "1080":
+                        if "720" in q: s += 800
+                        elif "480" in q: s += 500
+                        elif "360" in q: s += 200
+                    elif norm_quality == "720":
+                        if "480" in q: s += 800
+                        elif "360" in q: s += 500
+                        elif "1080" in q: s += 300
+                    elif norm_quality == "480":
+                        if "360" in q: s += 800
+                        elif "720" in q: s += 500
+                        elif "1080" in q: s += 200
+                    elif norm_quality == "360":
+                        if "480" in q: s += 800
+                        elif "720" in q: s += 500
                 else:
-                    log_err(f"Semua penyedia gagal menemukan server untuk {ep['title']}. Melewati episode ini.")
-                    continue
+                    if "1080" in q: s += 300
+                    elif "720" in q or "adaptive" in q.lower() or "hd" in q.lower(): s += 200
+                    elif "480" in q: s += 100
+                    elif "360" in q: s += 50
 
-            candidates.sort(key=score_candidate, reverse=True)
-            downloaded_ok = False
+                srv = c["server"].lower()
+                if "putarin" in srv or "hls" in srv: s += 30
+                elif "filedon" in srv: s += 25
+                elif "pixeldrain" in srv: s += 20
+                elif "yourupload" in srv: s += 18
+                elif "odcloud" in srv: s += 15
+                else: s += 5
+                return s
 
-            for cand in candidates:
-                s_name = cand["server"]
-                s_qual = cand["quality"]
-                is_hls = cand.get("is_hls", False)
-                log_info(f"Mencoba server {s_name} ({s_qual})...")
-                stream_url, ref = cand["resolve_fn"]()
-                if not stream_url:
-                    log_warn(f"Server {s_name} ({s_qual}) tidak tersedia, mencoba alternatif...")
-                    continue
+            # Determine target episodes (Single or Batch Range)
+            target_episodes = []
+            is_batch_mode = False
 
-                full_title = format_episode_display_title(clean_disp_title, ep['title'])
-                try:
-                    download_video(stream_url, full_title, s_qual, referer=ref, is_hls=is_hls)
-                    save_history(
-                        selected_anime.get("raw_title", selected_anime["title"]),
-                        selected_anime["url"],
-                        ep["title"],
-                        ep["ep_num"],
-                        ep["url"],
-                        selected_anime.get("provider", "otakudesu"),
-                        status="completed"
-                    )
-                    downloaded_ok = True
-                    break
-                except Exception as e:
-                    log_warn(f"Gagal mengunduh dari server {s_name}: {e}")
+            if initial_episode_spec:
+                target_episodes = parse_episode_spec(initial_episode_spec, episodes)
+                initial_episode_spec = None
+                if not target_episodes:
+                    log_warn(f"Episode '{args.episode}' tidak cocok dengan daftar episode yang tersedia.")
+            elif target_ep_num is not None:
+                matched = [ep for ep in episodes if ep["ep_num"] == target_ep_num]
+                if matched:
+                    target_episodes = matched
+                else:
+                    log_warn(f"Episode {target_ep_num} tidak ditemukan, silakan pilih manual.")
 
-            # Alternate fallback if primary provider downloads failed
-            if not downloaded_ok:
-                log_warn(f"Semua server di {prov_display} gagal mengunduh {ep['title']}. Mencoba fallback lintas penyedia...")
-                matched_alt_ep, alt_cands = REGISTRY.find_cross_provider_fallback(clean_disp_title, ep["ep_num"], selected_anime["provider"])
-                if alt_cands:
-                    alt_cands.sort(key=score_candidate, reverse=True)
-                    for cand in alt_cands:
+            if not target_episodes:
+                if args.download and len(episodes) > 1:
+                    batch_choice = {"title": f"📦 [Unduh Semua Episode (Batch - {len(episodes)} Episode)]", "is_batch": True}
+                    choice_items = [batch_choice] + episodes
+                    picked = fzf_select(choice_items, prompt="Pilih Episode untuk Diunduh (ESC untuk batal): ", display_fn=lambda x: x["title"])
+                    if not picked:
+                        if args.download:
+                            return
+                        continue
+                    if picked.get("is_batch"):
+                        target_episodes = list(episodes)
+                    else:
+                        target_episodes = [picked]
+                else:
+                    selected_ep = fzf_select(episodes, prompt="Pilih Episode (ESC untuk kembali): ", display_fn=lambda x: x["title"])
+                    if not selected_ep:
+                        if args.download:
+                            return
+                        continue
+                    target_episodes = [selected_ep]
+
+            if len(target_episodes) > 1:
+                is_batch_mode = True
+
+            # --------------------------------------------------------------------------
+            # MODE 1: DOWNLOAD ENGINE (Batch or Single)
+            # --------------------------------------------------------------------------
+            if args.download:
+                total_dl = len(target_episodes)
+                log_info(f"Memulai pengunduhan {total_dl} episode...")
+
+                for idx, ep in enumerate(target_episodes, 1):
+                    log_info(f"\n{C_BOLD}[{idx}/{total_dl}] Memproses {ep['title']}...{C_RESET}")
+                    candidates = extract_stream_candidates(ep)
+
+                    # Cross-Provider Fallback if no stream candidates found on current provider
+                    if not candidates:
+                        log_warn(f"Server tidak ditemukan di {prov_display} untuk {ep['title']}.")
+                        matched_alt_ep, alt_cands = REGISTRY.find_cross_provider_fallback(clean_disp_title, ep["ep_num"], selected_anime["provider"])
+                        if alt_cands:
+                            candidates = alt_cands
+                            ep = matched_alt_ep or ep
+                        else:
+                            log_err(f"Semua penyedia gagal menemukan server untuk {ep['title']}. Melewati episode ini.")
+                            continue
+
+                    candidates.sort(key=score_candidate, reverse=True)
+                    downloaded_ok = False
+
+                    for cand in candidates:
                         s_name = cand["server"]
                         s_qual = cand["quality"]
                         is_hls = cand.get("is_hls", False)
-                        log_info(f"Mencoba server cadangan: {s_name} ({s_qual})...")
+                        log_info(f"Mencoba server {s_name} ({s_qual})...")
                         stream_url, ref = cand["resolve_fn"]()
-                        if stream_url:
-                            full_title = f"{format_episode_display_title(clean_disp_title, ep['title'])} (Fallback)"
-                            try:
-                                download_video(stream_url, full_title, s_qual, referer=ref, is_hls=is_hls)
-                                save_history(
-                                    selected_anime.get("raw_title", selected_anime["title"]),
-                                    selected_anime["url"],
-                                    ep["title"],
-                                    ep["ep_num"],
-                                    ep["url"],
-                                    selected_anime.get("provider", "otakudesu"),
-                                    status="completed"
-                                )
-                                downloaded_ok = True
-                                break
-                            except Exception:
-                                pass
-
-            if not downloaded_ok:
-                log_err(f"Semua server di semua penyedia gagal mengunduh {ep['title']}.")
-
-        log_success(f"\nPengunduhan batch selesai ({total_dl} episode diproses)!")
-        return
-
-    # --------------------------------------------------------------------------
-    # MODE 2: STREAMING & PLAYBACK (Autoplay Range or Interactive)
-    # --------------------------------------------------------------------------
-    cur_list_idx = 0
-    while cur_list_idx < len(target_episodes):
-        ep = target_episodes[cur_list_idx]
-        log_info(f"Memproses {ep['title']}...")
-        candidates = extract_stream_candidates(ep)
-
-        # Cross-Provider Fallback if no stream candidates found on current provider
-        if not candidates:
-            log_warn(f"Server tidak ditemukan di {prov_display} untuk {ep['title']}.")
-            matched_alt_ep, alt_cands = REGISTRY.find_cross_provider_fallback(clean_disp_title, ep["ep_num"], selected_anime["provider"])
-            if alt_cands:
-                candidates = alt_cands
-                ep = matched_alt_ep or ep
-            else:
-                log_err(f"Semua penyedia gagal menemukan server untuk {ep['title']}.")
-                if cur_list_idx + 1 < len(target_episodes):
-                    try:
-                        c = input("Coba episode selanjutnya dalam antrean? [Y/n]: ").strip().lower()
-                        if c in ("", "y", "ya", "yes"):
-                            cur_list_idx += 1
+                        if not stream_url:
+                            log_warn(f"Server {s_name} ({s_qual}) tidak tersedia, mencoba alternatif...")
                             continue
-                    except (EOFError, KeyboardInterrupt):
-                        pass
-                break
 
-        candidates.sort(key=score_candidate, reverse=True)
-
-        # Check start_pos for this episode
-        start_pos_for_ep = initial_start_pos
-        if start_pos_for_ep == 0:
-            hist = load_history()
-            for h in hist:
-                if h.get("anime_url") == selected_anime["url"] and h.get("last_ep_num") == ep["ep_num"]:
-                    if h.get("status") == "in_progress" and h.get("time_pos", 0) > 0:
-                        start_pos_for_ep = h["time_pos"]
-                    break
-
-        played_successfully = False
-        last_playback_info = None
-
-        for cand in candidates:
-            s_name = cand["server"]
-            s_qual = cand["quality"]
-            is_hls = cand.get("is_hls", False)
-            log_info(f"Mencoba server {s_name} ({s_qual})...")
-            stream_url, ref = cand["resolve_fn"]()
-            if not stream_url:
-                log_warn(f"Server {s_name} ({s_qual}) tidak tersedia, mencoba alternatif...")
-                continue
-
-            full_title = format_episode_display_title(clean_disp_title, ep['title'])
-            ok, pb_state = play_video(stream_url, full_title, f"{s_qual} - {s_name}", referer=ref, is_hls=is_hls, start_pos=start_pos_for_ep)
-            if ok:
-                last_playback_info = pb_state
-                save_history(
-                    selected_anime.get("raw_title", selected_anime["title"]),
-                    selected_anime["url"],
-                    ep["title"],
-                    ep["ep_num"],
-                    ep["url"],
-                    selected_anime.get("provider", "otakudesu"),
-                    status=pb_state["status"],
-                    time_pos=pb_state["time_pos"],
-                    percent=pb_state["percent"],
-                    duration=pb_state["duration"]
-                )
-                played_successfully = True
-                break
-            else:
-                log_warn(f"Pemutaran video terputus atau gagal di {s_name}, mencoba server lain...")
-
-        # If all candidates on current provider failed to play, attempt Cross-Provider Fallback!
-        if not played_successfully:
-            log_warn(f"Semua server di {prov_display} gagal memutar {ep['title']}.")
-            matched_alt_ep, alt_cands = REGISTRY.find_cross_provider_fallback(clean_disp_title, ep["ep_num"], selected_anime["provider"])
-            if alt_cands:
-                alt_cands.sort(key=score_candidate, reverse=True)
-                for cand in alt_cands:
-                    s_name = cand["server"]
-                    s_qual = cand["quality"]
-                    is_hls = cand.get("is_hls", False)
-                    log_info(f"Mencoba server cadangan lintas penyedia: {s_name} ({s_qual})...")
-                    stream_url, ref = cand["resolve_fn"]()
-                    if stream_url:
-                        full_title = f"{format_episode_display_title(clean_disp_title, ep['title'])} (Fallback)"
-                        ok, pb_state = play_video(stream_url, full_title, f"{s_qual} - {s_name}", referer=ref, is_hls=is_hls, start_pos=start_pos_for_ep)
-                        if ok:
-                            last_playback_info = pb_state
+                        full_title = format_episode_display_title(clean_disp_title, ep['title'])
+                        try:
+                            download_video(stream_url, full_title, s_qual, referer=ref, is_hls=is_hls)
                             save_history(
                                 selected_anime.get("raw_title", selected_anime["title"]),
                                 selected_anime["url"],
@@ -2294,133 +2216,298 @@ def main():
                                 ep["ep_num"],
                                 ep["url"],
                                 selected_anime.get("provider", "otakudesu"),
-                                status=pb_state["status"],
-                                time_pos=pb_state["time_pos"],
-                                percent=pb_state["percent"],
-                                duration=pb_state["duration"]
+                                status="completed"
                             )
-                            played_successfully = True
+                            downloaded_ok = True
+                            break
+                        except Exception as e:
+                            log_warn(f"Gagal mengunduh dari server {s_name}: {e}")
+
+                    # Alternate fallback if primary provider downloads failed
+                    if not downloaded_ok:
+                        log_warn(f"Semua server di {prov_display} gagal mengunduh {ep['title']}. Mencoba fallback lintas penyedia...")
+                        matched_alt_ep, alt_cands = REGISTRY.find_cross_provider_fallback(clean_disp_title, ep["ep_num"], selected_anime["provider"])
+                        if alt_cands:
+                            alt_cands.sort(key=score_candidate, reverse=True)
+                            for cand in alt_cands:
+                                s_name = cand["server"]
+                                s_qual = cand["quality"]
+                                is_hls = cand.get("is_hls", False)
+                                log_info(f"Mencoba server cadangan: {s_name} ({s_qual})...")
+                                stream_url, ref = cand["resolve_fn"]()
+                                if stream_url:
+                                    full_title = f"{format_episode_display_title(clean_disp_title, ep['title'])} (Fallback)"
+                                    try:
+                                        download_video(stream_url, full_title, s_qual, referer=ref, is_hls=is_hls)
+                                        save_history(
+                                            selected_anime.get("raw_title", selected_anime["title"]),
+                                            selected_anime["url"],
+                                            ep["title"],
+                                            ep["ep_num"],
+                                            ep["url"],
+                                            selected_anime.get("provider", "otakudesu"),
+                                            status="completed"
+                                        )
+                                        downloaded_ok = True
+                                        break
+                                    except Exception:
+                                        pass
+
+                    if not downloaded_ok:
+                        log_err(f"Semua server di semua penyedia gagal mengunduh {ep['title']}.")
+
+                log_success(f"\nPengunduhan batch selesai ({total_dl} episode diproses)!")
+                return
+
+            # --------------------------------------------------------------------------
+            # MODE 2: STREAMING & PLAYBACK (Autoplay Range or Interactive)
+            # --------------------------------------------------------------------------
+            cur_list_idx = 0
+            while cur_list_idx < len(target_episodes):
+                ep = target_episodes[cur_list_idx]
+                log_info(f"Memproses {ep['title']}...")
+                candidates = extract_stream_candidates(ep)
+
+                # Cross-Provider Fallback if no stream candidates found on current provider
+                if not candidates:
+                    log_warn(f"Server tidak ditemukan di {prov_display} untuk {ep['title']}.")
+                    matched_alt_ep, alt_cands = REGISTRY.find_cross_provider_fallback(clean_disp_title, ep["ep_num"], selected_anime["provider"])
+                    if alt_cands:
+                        candidates = alt_cands
+                        ep = matched_alt_ep or ep
+                    else:
+                        log_err(f"Semua penyedia gagal menemukan server untuk {ep['title']}.")
+                        if cur_list_idx + 1 < len(target_episodes):
+                            try:
+                                c = input("Coba episode selanjutnya dalam antrean? [Y/n]: ").strip().lower()
+                                if c in ("", "y", "ya", "yes"):
+                                    cur_list_idx += 1
+                                    continue
+                            except (EOFError, KeyboardInterrupt):
+                                pass
+                        break
+
+                candidates.sort(key=score_candidate, reverse=True)
+
+                # Check start_pos for this episode
+                start_pos_for_ep = initial_start_pos
+                if start_pos_for_ep == 0:
+                    hist = load_history()
+                    for h in hist:
+                        if h.get("anime_url") == selected_anime["url"] and h.get("last_ep_num") == ep["ep_num"]:
+                            if h.get("status") == "in_progress" and h.get("time_pos", 0) > 0:
+                                start_pos_for_ep = h["time_pos"]
                             break
 
-        if not played_successfully:
-            log_err(f"Semua server alternatif di semua penyedia gagal memuat {ep['title']}.")
+                played_successfully = False
+                last_playback_info = None
 
-        # Check if user requested next/previous directly from MPV hotkeys:
-        ret_code = last_playback_info.get("ret_code", 0) if last_playback_info else 0
-        cur_idx_in_all = episodes.index(ep) if ep in episodes else -1
-        has_next = (cur_idx_in_all >= 0 and cur_idx_in_all + 1 < len(episodes))
-        has_prev = (cur_idx_in_all > 0)
+                for cand in candidates:
+                    s_name = cand["server"]
+                    s_qual = cand["quality"]
+                    is_hls = cand.get("is_hls", False)
+                    log_info(f"Mencoba server {s_name} ({s_qual})...")
+                    stream_url, ref = cand["resolve_fn"]()
+                    if not stream_url:
+                        log_warn(f"Server {s_name} ({s_qual}) tidak tersedia, mencoba alternatif...")
+                        continue
 
-        if ret_code == 2:  # 'N' or '>' pressed inside MPV
-            if has_next:
-                next_ep = episodes[cur_idx_in_all + 1]
-                target_episodes = [next_ep]
-                cur_list_idx = 0
-                initial_start_pos = 0
-                continue
-            else:
-                log_warn("Ini adalah episode terakhir dari seri ini!")
+                    full_title = format_episode_display_title(clean_disp_title, ep['title'])
+                    ok, pb_state = play_video(stream_url, full_title, f"{s_qual} - {s_name}", referer=ref, is_hls=is_hls, start_pos=start_pos_for_ep)
+                    if ok:
+                        last_playback_info = pb_state
+                        save_history(
+                            selected_anime.get("raw_title", selected_anime["title"]),
+                            selected_anime["url"],
+                            ep["title"],
+                            ep["ep_num"],
+                            ep["url"],
+                            selected_anime.get("provider", "otakudesu"),
+                            status=pb_state["status"],
+                            time_pos=pb_state["time_pos"],
+                            percent=pb_state["percent"],
+                            duration=pb_state["duration"]
+                        )
+                        played_successfully = True
+                        break
+                    else:
+                        log_warn(f"Pemutaran video terputus atau gagal di {s_name}, mencoba server lain...")
 
-        elif ret_code == 3:  # 'P' or '<' pressed inside MPV
-            if has_prev:
-                prev_ep = episodes[cur_idx_in_all - 1]
-                target_episodes = [prev_ep]
-                cur_list_idx = 0
-                initial_start_pos = 0
-                continue
-            else:
-                log_warn("Ini adalah episode pertama dari seri ini!")
+                # If all candidates on current provider failed to play, attempt Cross-Provider Fallback!
+                if not played_successfully:
+                    log_warn(f"Semua server di {prov_display} gagal memutar {ep['title']}.")
+                    matched_alt_ep, alt_cands = REGISTRY.find_cross_provider_fallback(clean_disp_title, ep["ep_num"], selected_anime["provider"])
+                    if alt_cands:
+                        alt_cands.sort(key=score_candidate, reverse=True)
+                        for cand in alt_cands:
+                            s_name = cand["server"]
+                            s_qual = cand["quality"]
+                            is_hls = cand.get("is_hls", False)
+                            log_info(f"Mencoba server cadangan lintas penyedia: {s_name} ({s_qual})...")
+                            stream_url, ref = cand["resolve_fn"]()
+                            if stream_url:
+                                full_title = f"{format_episode_display_title(clean_disp_title, ep['title'])} (Fallback)"
+                                ok, pb_state = play_video(stream_url, full_title, f"{s_qual} - {s_name}", referer=ref, is_hls=is_hls, start_pos=start_pos_for_ep)
+                                if ok:
+                                    last_playback_info = pb_state
+                                    save_history(
+                                        selected_anime.get("raw_title", selected_anime["title"]),
+                                        selected_anime["url"],
+                                        ep["title"],
+                                        ep["ep_num"],
+                                        ep["url"],
+                                        selected_anime.get("provider", "otakudesu"),
+                                        status=pb_state["status"],
+                                        time_pos=pb_state["time_pos"],
+                                        percent=pb_state["percent"],
+                                        duration=pb_state["duration"]
+                                    )
+                                    played_successfully = True
+                                    break
 
-        # Log completion / pause state
-        if last_playback_info and last_playback_info.get("status") == "in_progress":
-            t_str = format_time(last_playback_info['time_pos'])
-            log_info(f"Tontonan dijeda di menit {t_str} ({last_playback_info['percent']}%). Progres tersimpan.")
-        elif last_playback_info and last_playback_info.get("status") == "completed":
-            log_success(f"Selesai menonton {ep['title']}!")
+                if not played_successfully:
+                    log_err(f"Semua server alternatif di semua penyedia gagal memuat {ep['title']}.")
 
-        # If user explicitly requested batch mode and episode was completed, autoplay next in batch
-        if is_batch_mode and last_playback_info and last_playback_info.get("status") == "completed":
-            if cur_list_idx + 1 < len(target_episodes):
-                cur_list_idx += 1
-                initial_start_pos = 0
-                next_ep = target_episodes[cur_list_idx]
-                log_info(f"Memutar episode berikutnya dalam antrean: {next_ep['title']}...")
-                time.sleep(1)
-                continue
-            else:
-                log_success("Semua episode dalam antrean batch telah selesai ditonton!")
-                break
+                # Check if user requested next/previous directly from MPV hotkeys:
+                ret_code = last_playback_info.get("ret_code", 0) if last_playback_info else 0
+                cur_idx_in_all = episodes.index(ep) if ep in episodes else -1
+                has_next = (cur_idx_in_all >= 0 and cur_idx_in_all + 1 < len(episodes))
+                has_prev = (cur_idx_in_all > 0)
 
-        # PLAYER NAVIGATION UI (Menu Kontrol Pemutar Interaktif)
-        nav_options = []
+                if ret_code == 2:  # 'N' or '>' pressed inside MPV
+                    if has_next:
+                        next_ep = episodes[cur_idx_in_all + 1]
+                        target_episodes = [next_ep]
+                        cur_list_idx = 0
+                        initial_start_pos = 0
+                        continue
+                    else:
+                        log_warn("Ini adalah episode terakhir dari seri ini!")
 
-        if last_playback_info and last_playback_info.get("status") == "in_progress" and last_playback_info.get("time_pos", 0) > 0:
-            t_str = format_time(last_playback_info["time_pos"])
-            nav_options.append({
-                "action": "resume",
-                "label": f"▶ Lanjutkan Episode Ini ({ep['title']}) [dari menit {t_str}]",
-                "ep": ep,
-                "start": last_playback_info["time_pos"]
-            })
+                elif ret_code == 3:  # 'P' or '<' pressed inside MPV
+                    if has_prev:
+                        prev_ep = episodes[cur_idx_in_all - 1]
+                        target_episodes = [prev_ep]
+                        cur_list_idx = 0
+                        initial_start_pos = 0
+                        continue
+                    else:
+                        log_warn("Ini adalah episode pertama dari seri ini!")
 
-        if has_next:
-            next_ep = episodes[cur_idx_in_all + 1]
-            nav_options.append({
-                "action": "next",
-                "label": f"⏭ Episode Berikutnya ({next_ep['title']})",
-                "ep": next_ep,
-                "start": 0
-            })
+                # Wipe player dashboard cheat-sheet cleanly
+                if sys.stdout.isatty():
+                    clear_screen()
 
-        if has_prev:
-            prev_ep = episodes[cur_idx_in_all - 1]
-            nav_options.append({
-                "action": "prev",
-                "label": f"⏮ Episode Sebelumnya ({prev_ep['title']})",
-                "ep": prev_ep,
-                "start": 0
-            })
+                # Log completion / pause state
+                if last_playback_info and last_playback_info.get("status") == "in_progress":
+                    t_str = format_time(last_playback_info['time_pos'])
+                    log_info(f"Tontonan dijeda di menit {t_str} ({last_playback_info['percent']}%). Progres tersimpan.")
+                elif last_playback_info and last_playback_info.get("status") == "completed":
+                    log_success(f"Selesai menonton {ep['title']}!")
 
-        nav_options.extend([
-            {
-                "action": "replay",
-                "label": f"🔄 Putar Ulang Episode Ini dari Awal ({ep['title']})",
-                "ep": ep,
-                "start": 0
-            },
-            {
-                "action": "pick",
-                "label": "📋 Pilih Episode Lain dari Daftar...",
-                "ep": None,
-                "start": 0
-            },
-            {
-                "action": "exit",
-                "label": "⏹ Selesai / Keluar ke Menu Utama",
-                "ep": None,
-                "start": 0
-            }
-        ])
+                # If user explicitly requested batch mode and episode was completed, autoplay next in batch
+                if is_batch_mode and last_playback_info and last_playback_info.get("status") == "completed":
+                    if cur_list_idx + 1 < len(target_episodes):
+                        cur_list_idx += 1
+                        initial_start_pos = 0
+                        next_ep = target_episodes[cur_list_idx]
+                        log_info(f"Memutar episode berikutnya dalam antrean: {next_ep['title']}...")
+                        time.sleep(1)
+                        continue
+                    else:
+                        log_success("Semua episode dalam antrean batch telah selesai ditonton!")
+                        break
 
-        nav_pick = fzf_select(nav_options, prompt=f"Navigasi Pemutar [{ep['title']}]: ", display_fn=lambda x: x["label"])
-        if not nav_pick or nav_pick["action"] == "exit":
-            break
+                # PLAYER NAVIGATION UI (Menu Kontrol Pemutar Interaktif)
+                nav_options = []
 
-        act = nav_pick["action"]
-        if act in ("resume", "next", "prev", "replay"):
-            target_episodes = [nav_pick["ep"]]
-            cur_list_idx = 0
-            initial_start_pos = nav_pick["start"]
-            continue
-        elif act == "pick":
-            chosen_ep = fzf_select(episodes, prompt="Pilih Episode: ", display_fn=lambda x: x["title"])
-            if chosen_ep:
-                target_episodes = [chosen_ep]
-                cur_list_idx = 0
-                initial_start_pos = 0
-                continue
-            else:
-                break
+                if last_playback_info and last_playback_info.get("status") == "in_progress" and last_playback_info.get("time_pos", 0) > 0:
+                    t_str = format_time(last_playback_info["time_pos"])
+                    nav_options.append({
+                        "action": "resume",
+                        "label": f"▶ Lanjutkan Episode Ini ({ep['title']}) [dari menit {t_str}]",
+                        "ep": ep,
+                        "start": last_playback_info["time_pos"]
+                    })
+
+                if has_next:
+                    next_ep = episodes[cur_idx_in_all + 1]
+                    nav_options.append({
+                        "action": "next",
+                        "label": f"⏭ Episode Berikutnya ({next_ep['title']})",
+                        "ep": next_ep,
+                        "start": 0
+                    })
+
+                if has_prev:
+                    prev_ep = episodes[cur_idx_in_all - 1]
+                    nav_options.append({
+                        "action": "prev",
+                        "label": f"⏮ Episode Sebelumnya ({prev_ep['title']})",
+                        "ep": prev_ep,
+                        "start": 0
+                    })
+
+                nav_options.extend([
+                    {
+                        "action": "replay",
+                        "label": f"🔄 Putar Ulang Episode Ini dari Awal ({ep['title']})",
+                        "ep": ep,
+                        "start": 0
+                    },
+                    {
+                        "action": "pick",
+                        "label": "📋 Pilih Episode Lain dari Daftar...",
+                        "ep": None,
+                        "start": 0
+                    },
+                    {
+                        "action": "main_menu",
+                        "label": "🏠 Kembali ke Menu Utama",
+                        "ep": None,
+                        "start": 0
+                    },
+                    {
+                        "action": "exit",
+                        "label": "⏹ Selesai & Keluar dari anindo",
+                        "ep": None,
+                        "start": 0
+                    }
+                ])
+
+                nav_pick = fzf_select(nav_options, prompt=f"Navigasi Pemutar [{ep['title']}]: ", display_fn=lambda x: x["label"])
+                if not nav_pick or nav_pick["action"] == "main_menu":
+                    if sys.stdout.isatty():
+                        clear_screen()
+                    break
+
+                if nav_pick["action"] == "exit":
+                    if sys.stdout.isatty():
+                        clear_screen()
+                    print(f"{C_CYAN}[anindo]{C_RESET} {C_GREEN}Terima kasih telah menonton bersama anindo! Sampai jumpa.{C_RESET}\n")
+                    return
+
+                act = nav_pick["action"]
+                if act in ("resume", "next", "prev", "replay"):
+                    target_episodes = [nav_pick["ep"]]
+                    cur_list_idx = 0
+                    initial_start_pos = nav_pick["start"]
+                    continue
+                elif act == "pick":
+                    chosen_ep = fzf_select(episodes, prompt="Pilih Episode (ESC untuk kembali): ", display_fn=lambda x: x["title"])
+                    if chosen_ep:
+                        target_episodes = [chosen_ep]
+                        cur_list_idx = 0
+                        initial_start_pos = 0
+                        continue
+                    else:
+                        continue
+
+    except KeyboardInterrupt:
+        if sys.stdout.isatty():
+            clear_screen()
+        print(f"\n{C_CYAN}[anindo]{C_RESET} {C_YELLOW}Sesi anindo dihentikan.{C_RESET}\n")
+        return
 
 if __name__ == "__main__":
     main()
