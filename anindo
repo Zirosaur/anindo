@@ -1075,8 +1075,46 @@ def load_history():
         return []
 
 # ==============================================================================
-# 7. MAIN CONTROLLER & SELECTION INTERACTION
+# 7. INTERACTIVE SELECTION & CONTROLLER
 # ==============================================================================
+def fzf_select(items, prompt="Pilih: ", display_fn=str):
+    """Interactive selection using fzf with keyboard navigation and CLI fallback."""
+    if not items:
+        return None
+    if len(items) == 1:
+        return items[0]
+
+    lines = []
+    item_map = {}
+    for i, item in enumerate(items):
+        key = f"[{i+1:2d}] {display_fn(item)}"
+        lines.append(key)
+        item_map[key] = item
+
+    try:
+        proc = subprocess.Popen(
+            ["fzf", "--reverse", "--cycle", "--prompt", prompt, "--height=45%", "--border"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True
+        )
+        selected_line, _ = proc.communicate(input="\n".join(lines))
+        if proc.returncode == 0 and selected_line.strip():
+            return item_map.get(selected_line.strip())
+    except (FileNotFoundError, OSError):
+        print(f"\n{C_BOLD}{prompt}{C_RESET}")
+        for line in lines:
+            print(line)
+        while True:
+            try:
+                choice = input(f"{prompt} (1-{len(items)}): ").strip()
+                idx = int(choice) - 1
+                if 0 <= idx < len(items):
+                    return items[idx]
+            except (ValueError, EOFError, KeyboardInterrupt):
+                return None
+    return None
+
 def main():
     provider_choices = ["all"] + REGISTRY.names()
 

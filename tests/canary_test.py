@@ -92,6 +92,34 @@ def test_cross_provider_fallback():
 
 run_check("Modular Registry & Cross-Provider Fallback", test_cross_provider_fallback)
 
+# 6. Check Code Integrity & Interactive Helpers
+def test_code_integrity():
+    import symtable, builtins
+    with open(ANINDO_BIN) as f:
+        code = f.read()
+    top = symtable.symtable(code, str(ANINDO_BIN), "exec")
+    global_defs = set(top.get_identifiers()) | set(dir(builtins))
+    undefined = []
+    def check_scope(table, path=""):
+        curr_path = f"{path}.{table.get_name()}" if path else table.get_name()
+        for sym in table.get_symbols():
+            if sym.is_global() and sym.is_referenced() and not sym.is_assigned():
+                if sym.get_name() not in global_defs:
+                    undefined.append(f"{sym.get_name()} in {curr_path}")
+        for child in table.get_children():
+            check_scope(child, curr_path)
+    check_scope(top)
+    assert not undefined, f"Found undefined globals: {undefined}"
+    
+    # Check fzf_select single-item & empty behavior
+    fzf_fn = mod.get("fzf_select")
+    assert callable(fzf_fn), "fzf_select function is missing or not callable"
+    assert fzf_fn([]) is None, "fzf_select([]) must return None"
+    assert fzf_fn(["sample"]) == "sample", "fzf_select(['sample']) must return 'sample'"
+    print("  Code integrity & fzf_select verified: 0 undefined globals")
+
+run_check("Code Integrity & UI Helper (fzf_select)", test_code_integrity)
+
 # Summary
 print("\n" + "=" * 60)
 if failures:
@@ -102,3 +130,4 @@ if failures:
 else:
     print("[SUCCESS] All canary health checks passed cleanly!")
     sys.exit(0)
+
