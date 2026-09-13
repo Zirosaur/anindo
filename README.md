@@ -15,8 +15,9 @@
 - 🇮🇩 **Subtitle Bahasa Indonesia Asli**: Sub Indo sudah tertanam langsung di videonya (hardsub), tidak perlu repot sinkronisasi file `.srt` eksternal.
 - 🏎️ **Koleksi Lengkap (Modern + Anime Lawas/Vintage)**: Mendukung anime modern maupun anime klasik tahun 90-an & 2000-an seperti *Initial D (Stage 1-Final)*, *Slam Dunk*, *Great Teacher Onizuka (GTO)*, *Cowboy Bebop*, *Neon Genesis Evangelion*, dll.
 - 🌐 **Multi-Provider Search**: Melakukan pencarian paralel ke berbagai penyedia anime Sub Indo (Otakudesu & NontonAnime) secara otomatis.
+- 🔄 **Dynamic Domain Resolver (Anti-Blokir)**: Dilengkapi sistem deteksi pergantian domain otomatis (auto-probing & follow redirect) dan konfigurasi jarak jauh lewat file `domains.json` di GitHub. Jika domain situs berganti, `anindo` otomatis menyesuaikan diri tanpa perlu mengubah kode Python!
 - ⚡ **Pencarian Interaktif Cepat**: Menggunakan `fzf` untuk memilih anime dan episode dengan navigasi keyboard yang responsif.
-- 🔄 **Multi-Server & Auto-Fallback**: Mendukung berbagai server mirror berkecepatan tinggi (Filedon / Cloudflare R2, Pixeldrain, Putarin HLS, YourUpload, ODCloud). Jika satu server DMCA/offline, otomatis beralih ke server cadangan.
+- 🛡️ **Multi-Server & Auto-Fallback**: Mendukung berbagai server mirror berkecepatan tinggi (Filedon / Cloudflare R2, Pixeldrain, Putarin HLS, YourUpload, ODCloud). Jika satu server DMCA/offline, otomatis beralih ke server cadangan.
 - 📺 **Pemutar Video MPV**: Streaming langsung tanpa iklan web atau pop-up, mendukung resume posisi tontonan terakhir.
 - ⏭️ **Auto-Next Episode**: Menawarkan pemutaran episode berikutnya secara otomatis setelah episode selesai.
 - 🕒 **Riwayat Tontonan (History & Continue)**: Menyimpan riwayat tontonan untuk langsung melanjutkan kapan saja (`-c`).
@@ -136,14 +137,24 @@ Pilihan kualitas: `360`, `480`, `720`, `1080`, `best`.
 anindo -d -e 1 "initial d"
 ```
 
+### 9. Periksa & Perbarui Domain Sumber
+Jika salah satu situs berganti domain, jalankan:
+```bash
+anindo --update-domains
+```
+Atau atur domain manual melalui environment variable atau file `~/.config/anindo/config.json`:
+```bash
+ANINDO_OTAKUDESU_URL="https://otakudesu.cloud" anindo "one piece"
+```
+
 ---
 
 ## 🛠️ Opsi Perintah Lengkap
 
 ```text
 usage: anindo [-h] [-e EPISODE] [-q {360,480,720,1080,best}]
-              [-p {all,otakudesu,nontonanime}] [-o] [-c] [-d] [--history] [-V]
-              [query]
+              [-p {all,otakudesu,nontonanime}] [-o] [-c] [-d] [--history]
+              [--update-domains] [-V] [query]
 
 positional arguments:
   query                 Judul anime yang dicari (misal: 'initial d', 'frieren')
@@ -157,6 +168,7 @@ options:
   -c, --continue-watch  Lanjutkan anime dari riwayat terakhir
   -d, --download        Unduh video ke lokal alih-alih memutar
   --history             Tampilkan riwayat anime yang pernah ditonton
+  --update-domains      Segarkan dan periksa domain aktif dari GitHub / resolver
   -V, --version         Tampilkan versi program
 ```
 

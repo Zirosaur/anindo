@@ -2,7 +2,7 @@
 """
 anindo - CLI Streaming Anime Subtitle Indonesia (ani-cli alternative with Indonesian subtitles)
 Author: Google Deepmind Antigravity Pair Programmer for ziro
-Version: 1.4.0
+Version: 1.5.0
 """
 
 import sys
@@ -26,15 +26,32 @@ try:
 except ImportError:
     AESGCM = None
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 CACHE_DIR = Path.home() / ".cache" / "anindo"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 HISTORY_FILE = CACHE_DIR / "history.json"
 CATALOG_CACHE_FILE = CACHE_DIR / "catalog.json"
+DOMAINS_CACHE_FILE = CACHE_DIR / "domains.json"
+USER_CONFIG_FILE = Path.home() / ".config" / "anindo" / "config.json"
+REMOTE_DOMAINS_URL = "https://raw.githubusercontent.com/Zirosaur/anindo/main/domains.json"
 
-OTAKUDESU_BASE = "https://otakudesu.blog"
-NONTONANIME_BASE = "https://ww2.nontonanime.co"
 USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
+
+# Default fallback domains
+DEFAULT_DOMAINS = {
+    "otakudesu": [
+        "https://otakudesu.blog",
+        "https://otakudesu.cloud",
+        "https://otakudesu.wiki"
+    ],
+    "nontonanime": [
+        "https://ww2.nontonanime.co",
+        "https://nontonanime.co",
+        "https://nontonanime.site"
+    ]
+}
+
+_RESOLVED_DOMAINS = {}
 
 # ANSI Colors
 C_RESET = "\033[0m"
@@ -59,6 +76,119 @@ def log_warn(msg):
 def log_err(msg):
     print(f"{C_RED}[anindo]{C_RESET} {msg}", file=sys.stderr)
 
+def probe_and_resolve_domain(url, timeout=3):
+    """Probe a domain, follow redirects (301/302), and return effective base domain if 200 OK."""
+    cmd = [
+        "curl", "-s", "-I", "-L", "-o", "/dev/null",
+        "-w", "%{http_code} %{url_effective}",
+        "--max-time", str(timeout),
+        "-H", f"User-Agent: {USER_AGENT}",
+        url
+    ]
+    try:
+        out = subprocess.check_output(cmd).decode("utf-8", "ignore").strip()
+        parts = out.split()
+        if len(parts) >= 2 and parts[0] == "200":
+            effective = parts[1]
+            parsed = urllib.parse.urlparse(effective)
+            return f"{parsed.scheme}://{parsed.netloc}"
+    except Exception:
+        pass
+    return None
+
+def get_base_url(provider, force_refresh=False):
+    """
+    Get active base URL for a provider with dynamic discovery and multi-level fallback:
+    1. Environment variable (e.g. ANINDO_OTAKUDESU_URL)
+    2. User config (~/.config/anindo/config.json)
+    3. In-memory cache
+    4. Local cache (~/.cache/anindo/domains.json, 12h TTL)
+    5. Remote GitHub domains.json or built-in DEFAULT_DOMAINS with auto-probing & redirect-following
+    """
+    if not force_refresh and provider in _RESOLVED_DOMAINS:
+        return _RESOLVED_DOMAINS[provider]
+
+    # 1. Environment Variable Override
+    env_key = f"ANINDO_{provider.upper()}_URL"
+    if os.environ.get(env_key):
+        domain = os.environ[env_key].rstrip("/")
+        _RESOLVED_DOMAINS[provider] = domain
+        return domain
+
+    # 2. User Config Override (~/.config/anindo/config.json)
+    if USER_CONFIG_FILE.exists():
+        try:
+            with open(USER_CONFIG_FILE, "r") as f:
+                u_cfg = json.load(f)
+                cfg_val = u_cfg.get(f"{provider}_url") or u_cfg.get(provider)
+                if cfg_val:
+                    domain = cfg_val.rstrip("/")
+                    _RESOLVED_DOMAINS[provider] = domain
+                    return domain
+        except Exception:
+            pass
+
+    # 3. Local Cache (~/.cache/anindo/domains.json)
+    cached_domains = {}
+    if not force_refresh and DOMAINS_CACHE_FILE.exists():
+        try:
+            mtime = DOMAINS_CACHE_FILE.stat().st_mtime
+            if time.time() - mtime < 43200: # 12 hours valid
+                with open(DOMAINS_CACHE_FILE, "r") as f:
+                    cached_domains = json.load(f)
+                    if provider in cached_domains and "active" in cached_domains[provider]:
+                        active_cand = cached_domains[provider]["active"]
+                        resolved = probe_and_resolve_domain(active_cand, timeout=2)
+                        if resolved:
+                            _RESOLVED_DOMAINS[provider] = resolved
+                            return resolved
+        except Exception:
+            pass
+
+    # 4. Fetch candidate list from Remote GitHub or default list
+    candidate_list = list(DEFAULT_DOMAINS.get(provider, []))
+    try:
+        cmd = ["curl", "-s", "--max-time", "3", "-H", f"User-Agent: {USER_AGENT}", REMOTE_DOMAINS_URL]
+        remote_data = subprocess.check_output(cmd).decode("utf-8", "ignore")
+        remote_json = json.loads(remote_data)
+        if provider in remote_json and isinstance(remote_json[provider], list):
+            candidate_list = list(dict.fromkeys(remote_json[provider] + candidate_list))
+    except Exception:
+        pass
+
+    # 5. Probe candidates to find an active working domain
+    working_domain = None
+    for cand in candidate_list:
+        resolved = probe_and_resolve_domain(cand, timeout=3)
+        if resolved:
+            working_domain = resolved
+            break
+
+    if not working_domain:
+        working_domain = DEFAULT_DOMAINS.get(provider, [""])[0] if DEFAULT_DOMAINS.get(provider) else ""
+
+    _RESOLVED_DOMAINS[provider] = working_domain
+
+    # Save to local cache
+    try:
+        disk_cached = {}
+        if DOMAINS_CACHE_FILE.exists():
+            try:
+                with open(DOMAINS_CACHE_FILE, "r") as f:
+                    disk_cached = json.load(f)
+            except Exception:
+                disk_cached = {}
+        disk_cached[provider] = {
+            "active": working_domain,
+            "timestamp": int(time.time())
+        }
+        with open(DOMAINS_CACHE_FILE, "w") as f:
+            json.dump(disk_cached, f, indent=2)
+    except Exception:
+        pass
+
+    return working_domain
+
 def curl_get(url, referer=None, timeout=12):
     cmd = ["curl", "-s", "-L", "--max-time", str(timeout), "-H", f"User-Agent: {USER_AGENT}"]
     if referer:
@@ -79,12 +209,13 @@ def curl_redirect(url, timeout=5):
         return None
 
 def curl_post_ajax(body_dict, referer, timeout=6):
+    otakudesu_base = get_base_url("otakudesu")
     body_str = "&".join(f"{k}={v}" for k, v in body_dict.items())
     cmd = [
-        "curl", "-s", "-X", "POST", f"{OTAKUDESU_BASE}/wp-admin/admin-ajax.php",
+        "curl", "-s", "-X", "POST", f"{otakudesu_base}/wp-admin/admin-ajax.php",
         "-H", f"User-Agent: {USER_AGENT}",
         "-H", f"Referer: {referer}",
-        "-H", f"Origin: {OTAKUDESU_BASE}",
+        "-H", f"Origin: {otakudesu_base}",
         "-H", "X-Requested-With: XMLHttpRequest",
         "--max-time", str(timeout),
         "-d", body_str
@@ -294,7 +425,8 @@ def fzf_select(items, prompt="Pilih: ", display_fn=str):
 def get_ongoing_anime():
     """Fetch latest ongoing anime releases from Otakudesu."""
     log_info("Mengambil daftar anime on-going terbaru...")
-    html_page = curl_get(f"{OTAKUDESU_BASE}/ongoing-anime/")
+    otakudesu_base = get_base_url("otakudesu")
+    html_page = curl_get(f"{otakudesu_base}/ongoing-anime/")
     items = []
     for m in re.finditer(r'<div class=[\'"]thumb[\'"]><a href=[\'"]([^\'"]+)[\'"].*?<h2 class=[\'"]jdlflm[\'"]>([^<]+)</h2>', html_page, re.DOTALL):
         url = m.group(1).strip()
@@ -309,7 +441,8 @@ def get_ongoing_anime():
 
 def search_otakudesu(query):
     """Search for anime on Otakudesu."""
-    url = f"{OTAKUDESU_BASE}/?s={urllib.parse.quote(query)}&post_type=anime"
+    otakudesu_base = get_base_url("otakudesu")
+    url = f"{otakudesu_base}/?s={urllib.parse.quote(query)}&post_type=anime"
     html_page = curl_get(url)
 
     results = []
@@ -345,7 +478,8 @@ def get_catalog():
         except Exception:
             pass
 
-    html_page = curl_get(f"{OTAKUDESU_BASE}/anime-list/")
+    otakudesu_base = get_base_url("otakudesu")
+    html_page = curl_get(f"{otakudesu_base}/anime-list/")
     catalog = []
     links = re.findall(r'<a class="hodebgst"[^>]*href="([^"]+)"[^>]*>([^<]+)', html_page)
     for link, title in links:
@@ -368,12 +502,13 @@ def get_catalog():
 
 def search_nontonanime(query):
     """Search for anime on NontonAnime (great for classic/vintage 90s-2000s anime)."""
-    url = f"{NONTONANIME_BASE}/?s={urllib.parse.quote(query)}"
+    nonton_base = get_base_url("nontonanime")
+    url = f"{nonton_base}/?s={urllib.parse.quote(query)}"
     html_page = curl_get(url)
     articles = re.findall(r'<article[^>]*>(.*?)</article>', html_page, re.DOTALL)
     results = []
     for a in articles:
-        link_m = re.search(r'href=[\"\'](https://ww2\.nontonanime\.co/anime/[^\"\']+)[\"\']', a)
+        link_m = re.search(r'href=[\"\']([^\"\']+/anime/[^\"\']+)[\"\']', a)
         if not link_m:
             continue
         link = link_m.group(1)
@@ -418,7 +553,7 @@ def search_anime(query, provider="all"):
 def get_otakudesu_episodes(anime_url):
     """Fetch Otakudesu episodes list."""
     html_page = curl_get(anime_url)
-    raw_eps = re.findall(r'<a href="(https://otakudesu\.blog/episode/[^"]+)"[^>]*>([^<]+)</a>', html_page)
+    raw_eps = re.findall(r'<a href="([^"]+/episode/[^"]+)"[^>]*>([^<]+)</a>', html_page)
     episodes = []
     for link, title in raw_eps:
         clean_title = title.replace("&#8211;", "-").replace("&amp;", "&").replace("Subtitle Indonesia", "").strip()
@@ -436,7 +571,7 @@ def get_otakudesu_episodes(anime_url):
 def get_nontonanime_episodes(anime_url):
     """Fetch NontonAnime episodes list."""
     html_page = curl_get(anime_url)
-    matches = re.findall(r'<a\s+[^>]*href=[\"\'](https://ww2\.nontonanime\.co/nonton/[^\"\']+)[\"\'][^>]*>(.*?)</a>', html_page, re.DOTALL)
+    matches = re.findall(r'<a\s+[^>]*href=[\"\']([^\"\']+/nonton/[^\"\']+)[\"\'][^>]*>(.*?)</a>', html_page, re.DOTALL)
     episodes = {}
     for href, inner in matches:
         m = re.search(r'episode-(\d+(?:\.\d+)?)', href)
@@ -458,7 +593,7 @@ def get_anime_details(anime_item):
     log_info("Mengambil daftar episode...")
     provider = anime_item.get("provider")
     url = anime_item.get("url", "")
-    if provider == "nontonanime" or "nontonanime.co" in url:
+    if provider == "nontonanime" or "nontonanime" in url:
         return get_nontonanime_episodes(url)
     return get_otakudesu_episodes(url)
 
@@ -551,7 +686,7 @@ def extract_stream_candidates(ep_item):
     log_info("Mengekstrak opsi mirror Sub Indo...")
     provider = ep_item.get("provider")
     url = ep_item.get("url", "")
-    if provider == "nontonanime" or "nontonanime.co" in url:
+    if provider == "nontonanime" or "nontonanime" in url:
         return extract_nontonanime_candidates(url)
     return extract_otakudesu_candidates(url)
 
@@ -686,7 +821,7 @@ def main():
     parser = argparse.ArgumentParser(
         prog="anindo",
         description="anindo - Streaming Anime Subtitle Indonesia via Terminal (CLI)",
-        epilog="Contoh:\n  anindo 'initial d'\n  anindo frieren\n  anindo 'one piece' -e 1177\n  anindo -o (lihat anime ongoing terbaru)\n  anindo -c (lanjutkan tontonan terakhir)\n  anindo -p nontonanime 'slam dunk'",
+        epilog="Contoh:\n  anindo 'initial d'\n  anindo frieren\n  anindo 'one piece' -e 1177\n  anindo -o (lihat anime ongoing terbaru)\n  anindo -c (lanjutkan tontonan terakhir)\n  anindo --update-domains (periksa domain terbaru)",
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("query", nargs="?", help="Judul anime yang dicari (misal: 'initial d', 'frieren')")
@@ -697,6 +832,7 @@ def main():
     parser.add_argument("-c", "--continue-watch", dest="continue_watch", action="store_true", help="Lanjutkan anime dari riwayat terakhir")
     parser.add_argument("-d", "--download", action="store_true", help="Unduh video ke lokal alih-alih memutar")
     parser.add_argument("--history", action="store_true", help="Tampilkan riwayat anime yang pernah ditonton")
+    parser.add_argument("--update-domains", action="store_true", help="Segarkan dan periksa domain aktif dari GitHub / resolver")
     parser.add_argument("-V", "--version", action="version", version=f"anindo v{VERSION}")
 
     args = parser.parse_args()
@@ -705,6 +841,19 @@ def main():
     print(f"{C_CYAN}{C_BOLD}╔══════════════════════════════════════════════════╗{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}║      anindo - Anime Subtitle Indonesia CLI       ║{C_RESET}")
     print(f"{C_CYAN}{C_BOLD}╚══════════════════════════════════════════════════╝{C_RESET}\n")
+
+    if args.update_domains:
+        log_info("Memeriksa dan menyegarkan domain penyedia anime...")
+        if DOMAINS_CACHE_FILE.exists():
+            try:
+                DOMAINS_CACHE_FILE.unlink()
+            except Exception:
+                pass
+        d_otaku = get_base_url("otakudesu", force_refresh=True)
+        d_nonton = get_base_url("nontonanime", force_refresh=True)
+        log_success(f"Otakudesu aktif   : {d_otaku}")
+        log_success(f"NontonAnime aktif : {d_nonton}")
+        return
 
     selected_anime = None
     target_ep_num = args.episode
