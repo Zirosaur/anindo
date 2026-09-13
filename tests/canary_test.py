@@ -78,6 +78,20 @@ def test_putarin_decrypt():
 
 run_check("Putarin HLS Decryptor", test_putarin_decrypt)
 
+# 5. Check Modular Registry & Cross-Provider Fallback
+def test_cross_provider_fallback():
+    reg = mod["REGISTRY"]
+    assert len(reg.all()) >= 2, "Expected at least 2 registered providers"
+    print(f"  Registered providers: {reg.names()}")
+
+    # Test fallback lookup for Sousou no Frieren Ep 1 excluding Otakudesu
+    alt_ep, alt_cands = reg.find_cross_provider_fallback("Sousou no Frieren", 1.0, exclude_provider="otakudesu")
+    assert alt_ep is not None, "Failed to find fallback episode on alternate provider"
+    assert len(alt_cands) > 0, "No candidates found on alternate provider"
+    print(f"  Cross-Provider Fallback OK: resolved {alt_ep['title']} on alternate provider with {len(alt_cands)} candidate(s)")
+
+run_check("Modular Registry & Cross-Provider Fallback", test_cross_provider_fallback)
+
 # Summary
 print("\n" + "=" * 60)
 if failures:

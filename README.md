@@ -14,7 +14,8 @@
 
 - 🇮🇩 **Subtitle Bahasa Indonesia Asli**: Sub Indo sudah tertanam langsung di videonya (hardsub), tidak perlu repot sinkronisasi file `.srt` eksternal.
 - 🏎️ **Koleksi Lengkap (Modern + Anime Lawas/Vintage)**: Mendukung anime modern maupun anime klasik tahun 90-an & 2000-an seperti *Initial D (Stage 1-Final)*, *Slam Dunk*, *Great Teacher Onizuka (GTO)*, *Cowboy Bebop*, *Neon Genesis Evangelion*, dll.
-- 🌐 **Multi-Provider Search**: Melakukan pencarian paralel ke berbagai penyedia anime Sub Indo (Otakudesu & NontonAnime) secara otomatis.
+- 🌐 **Modular Provider Architecture (`BaseProvider` & `ProviderRegistry`)**: Dibangun dengan pola *registry/plugin* ala `yt-dlp`. Setiap penyedia terisolasi secara mandiri dan sangat mudah diperluas (*scalable*).
+- 🔄 **Cross-Provider Episode Stream Fallback**: Jika seluruh server video pada suatu episode di penyedia A gagal diputar/DMCA, `anindo` tidak akan menyerah, melainkan **otomatis mencari mirror episode yang sama di penyedia cadangan** dan langsung memutarnya secara transparan!
 - 🛡️ **Enterprise Resilient Scraper**:
   - **Zero-Regex DOM Tokenizer**: Menggunakan `html.parser` bawaan Python yang kebal terhadap perubahan urutan atribut HTML, penataan spasi, minifikasi HTML, dan perombakan tema web.
   - **Remote OTA Rules (`rules.json`)**: Pola selektor dan rute ekstraksi dikonfigurasi secara jarak jauh lewat GitHub tanpa perlu mengubah kode skrip Python jika web sumber berubah.

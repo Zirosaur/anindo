@@ -2,7 +2,7 @@
 """
 anindo - CLI Streaming Anime Subtitle Indonesia (ani-cli alternative with Indonesian subtitles)
 Author: Google Deepmind Antigravity Pair Programmer for ziro
-Version: 1.6.0
+Version: 1.7.0 (Modular Provider & Cross-Provider Stream Fallback)
 """
 
 import sys
@@ -18,6 +18,7 @@ import urllib.request
 import time
 import threading
 import concurrent.futures
+from abc import ABC, abstractmethod
 from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from html.parser import HTMLParser
@@ -27,7 +28,7 @@ try:
 except ImportError:
     AESGCM = None
 
-VERSION = "1.6.0"
+VERSION = "1.7.0"
 CACHE_DIR = Path.home() / ".cache" / "anindo"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 HISTORY_FILE = CACHE_DIR / "history.json"
@@ -98,6 +99,9 @@ def log_warn(msg):
 def log_err(msg):
     print(f"{C_RED}[anindo]{C_RESET} {msg}", file=sys.stderr)
 
+# ==============================================================================
+# 1. RESILIENT DOM TOKENIZER
+# ==============================================================================
 class DOMParser(HTMLParser):
     """Resilient DOM Tokenizer that extracts links, meta tags, and iframes without regex fragility."""
     def __init__(self):
@@ -143,13 +147,15 @@ class DOMParser(HTMLParser):
         elif self._in_json_ld:
             self._json_ld_buf += data
 
+# ==============================================================================
+# 2. OVER-THE-AIR RULES & DYNAMIC DOMAIN RESOLUTION
+# ==============================================================================
 def get_rules():
     """Retrieve scraping rules with remote OTA update and local cache."""
     global _ACTIVE_RULES
     if _ACTIVE_RULES is not None:
         return _ACTIVE_RULES
 
-    # Check local cache
     if RULES_CACHE_FILE.exists():
         try:
             mtime = RULES_CACHE_FILE.stat().st_mtime
@@ -160,7 +166,6 @@ def get_rules():
         except Exception:
             pass
 
-    # Try fetch remote rules from GitHub
     try:
         cmd = ["curl", "-s", "--max-time", "3", "-H", f"User-Agent: {USER_AGENT}", REMOTE_RULES_URL]
         data = subprocess.check_output(cmd).decode("utf-8", "ignore")
@@ -204,14 +209,12 @@ def get_base_url(provider, force_refresh=False):
     if not force_refresh and provider in _RESOLVED_DOMAINS:
         return _RESOLVED_DOMAINS[provider]
 
-    # 1. Environment Variable Override
     env_key = f"ANINDO_{provider.upper()}_URL"
     if os.environ.get(env_key):
         domain = os.environ[env_key].rstrip("/")
         _RESOLVED_DOMAINS[provider] = domain
         return domain
 
-    # 2. User Config Override (~/.config/anindo/config.json)
     if USER_CONFIG_FILE.exists():
         try:
             with open(USER_CONFIG_FILE, "r") as f:
@@ -224,12 +227,11 @@ def get_base_url(provider, force_refresh=False):
         except Exception:
             pass
 
-    # 3. Local Cache (~/.cache/anindo/domains.json)
     cached_domains = {}
     if not force_refresh and DOMAINS_CACHE_FILE.exists():
         try:
             mtime = DOMAINS_CACHE_FILE.stat().st_mtime
-            if time.time() - mtime < 43200: # 12 hours valid
+            if time.time() - mtime < 43200: # 12h cache
                 with open(DOMAINS_CACHE_FILE, "r") as f:
                     cached_domains = json.load(f)
                     if provider in cached_domains and "active" in cached_domains[provider]:
@@ -241,7 +243,6 @@ def get_base_url(provider, force_refresh=False):
         except Exception:
             pass
 
-    # 4. Fetch candidate list from Remote GitHub or default list
     candidate_list = list(DEFAULT_DOMAINS.get(provider, []))
     try:
         cmd = ["curl", "-s", "--max-time", "3", "-H", f"User-Agent: {USER_AGENT}", REMOTE_DOMAINS_URL]
@@ -252,7 +253,6 @@ def get_base_url(provider, force_refresh=False):
     except Exception:
         pass
 
-    # 5. Probe candidates to find an active working domain
     working_domain = None
     for cand in candidate_list:
         resolved = probe_and_resolve_domain(cand, timeout=3)
@@ -265,7 +265,6 @@ def get_base_url(provider, force_refresh=False):
 
     _RESOLVED_DOMAINS[provider] = working_domain
 
-    # Save to local cache
     try:
         disk_cached = {}
         if DOMAINS_CACHE_FILE.exists():
@@ -285,6 +284,9 @@ def get_base_url(provider, force_refresh=False):
 
     return working_domain
 
+# ==============================================================================
+# 3. HTTP & STREAM RESOLVER UTILITIES
+# ==============================================================================
 def curl_get(url, referer=None, timeout=12):
     cmd = ["curl", "-s", "-L", "--max-time", str(timeout), "-H", f"User-Agent: {USER_AGENT}"]
     if referer:
@@ -331,7 +333,6 @@ def resolve_pixeldrain(raw_href):
     file_id = loc.split("/u/")[1].split("/")[0]
     p_url = f"https://pixeldrain.com/api/file/{file_id}"
     
-    # Pre-flight check: ensure it's not 451 DMCA / 404
     cmd = ["curl", "-s", "-I", "--max-time", "3", p_url]
     try:
         out = subprocess.check_output(cmd).decode("utf-8", "ignore")
@@ -366,16 +367,12 @@ def resolve_filedon(raw_href):
     return None, None
 
 def resolve_yourupload_embed(embed_url):
-    m_id = re.search(r'id=([A-Za-z0-9_-]+)', embed_url)
-    if not m_id:
-        m_id = re.search(r'/embed/([A-Za-z0-9_-]+)', embed_url)
+    m_id = re.search(r'id=([A-Za-z0-9_-]+)', embed_url) or re.search(r'/embed/([A-Za-z0-9_-]+)', embed_url)
     if not m_id:
         return None, None
     yu_id = m_id.group(1)
     page = curl_get(f"https://yourupload.com/embed/{yu_id}", referer="https://desudrive.com/", timeout=6)
-    v_match = re.search(r"file\s*:\s*['\"](https?://[^'\"]+\.mp4[^'\"]*)['\"]", page)
-    if not v_match:
-        v_match = re.search(r'property="og:video"\s+content="([^"]+)"', page)
+    v_match = re.search(r"file\s*:\s*['\"](https?://[^'\"]+\.mp4[^'\"]*)['\"]", page) or re.search(r'property="og:video"\s+content="([^"]+)"', page)
     if v_match:
         return v_match.group(1), "https://yourupload.com/"
     return None, None
@@ -482,242 +479,435 @@ def fix_m3u8_content(content_str, base_url):
                 out_lines.append(stripped)
     return "\n".join(out_lines).encode("utf-8")
 
-def fzf_select(items, prompt="Pilih: ", display_fn=str):
-    """Interactive selection using fzf with keyboard navigation."""
-    if not items:
-        return None
-    if len(items) == 1:
-        return items[0]
+# ==============================================================================
+# 4. MODULAR PROVIDER ARCHITECTURE
+# ==============================================================================
+class BaseProvider(ABC):
+    """Abstract interface for all anime streaming providers."""
+    name: str = ""
+    display_name: str = ""
 
-    lines = []
-    item_map = {}
-    for i, item in enumerate(items):
-        key = f"[{i+1:2d}] {display_fn(item)}"
-        lines.append(key)
-        item_map[key] = item
+    @abstractmethod
+    def search(self, query: str) -> list[dict]:
+        """Search anime: returns list of dicts with 'title', 'raw_title', 'url', 'provider'."""
+        pass
 
-    try:
-        proc = subprocess.Popen(
-            ["fzf", "--reverse", "--cycle", "--prompt", prompt, "--height=45%", "--border"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            text=True
-        )
-        selected_line, _ = proc.communicate(input="\n".join(lines))
-        if proc.returncode == 0 and selected_line.strip():
-            return item_map.get(selected_line.strip())
-    except FileNotFoundError:
-        print(f"\n{C_BOLD}{prompt}{C_RESET}")
-        for line in lines:
-            print(line)
-        while True:
-            try:
-                choice = input(f"{prompt} (1-{len(items)}): ").strip()
-                idx = int(choice) - 1
-                if 0 <= idx < len(items):
-                    return items[idx]
-            except (ValueError, EOFError, KeyboardInterrupt):
-                return None
-    return None
+    @abstractmethod
+    def get_episodes(self, anime_url: str) -> list[dict]:
+        """Fetch episode list: returns list of dicts with 'title', 'url', 'ep_num', 'provider'."""
+        pass
 
-def get_ongoing_anime():
-    """Fetch latest ongoing anime releases from Otakudesu using DOMParser."""
-    log_info("Mengambil daftar anime on-going terbaru...")
-    otakudesu_base = get_base_url("otakudesu")
-    rules = get_rules()
-    ongoing_path = rules.get("otakudesu", {}).get("ongoing_path", "/ongoing-anime/")
-    html_page = curl_get(f"{otakudesu_base}{ongoing_path}")
+    @abstractmethod
+    def extract_streams(self, ep_url: str) -> list[dict]:
+        """Extract stream candidates: returns list of dicts with 'quality', 'server', 'is_hls', 'resolve_fn'."""
+        pass
 
-    parser = DOMParser()
-    parser.feed(html_page)
+    def get_ongoing(self) -> list[dict]:
+        """Optional: fetch ongoing anime."""
+        return []
 
-    items = []
-    seen = set()
-    for link in parser.links:
-        href = link["href"]
-        if "/anime/" in href and href not in seen:
-            t = link["text"] or link["title"]
-            if t and len(t) > 3 and "ongoing" not in t.lower():
-                seen.add(href)
-                clean_title = t.replace("&#8211;", "-").replace("&amp;", "&").strip()
-                items.append({
-                    "title": f"{clean_title} (Ongoing) [Otakudesu]",
-                    "raw_title": clean_title,
-                    "url": href,
-                    "provider": "otakudesu"
-                })
+    def get_catalog(self) -> list[dict]:
+        """Optional: fetch full catalog index."""
+        return []
 
-    # Regex fallback if DOMParser found fewer items
-    if len(items) < 3:
-        for m in re.finditer(r'<div class=[\'"]thumb[\'"]><a href=[\'"]([^\'"]+)[\'"].*?<h2 class=[\'"]jdlflm[\'"]>([^<]+)</h2>', html_page, re.DOTALL):
-            url = m.group(1).strip()
-            if url not in seen:
-                seen.add(url)
-                title = m.group(2).replace("&#8211;", "-").replace("&amp;", "&").strip()
-                items.append({
-                    "title": f"{title} (Ongoing) [Otakudesu]",
-                    "raw_title": title,
-                    "url": url,
-                    "provider": "otakudesu"
-                })
+class OtakudesuProvider(BaseProvider):
+    """Provider implementation for Otakudesu (Modern Anime, Ongoing, BD Batches)."""
+    name = "otakudesu"
+    display_name = "Otakudesu"
 
-    return items
+    def search(self, query: str) -> list[dict]:
+        base = get_base_url(self.name)
+        rules = get_rules()
+        search_path = rules.get(self.name, {}).get("search_path", "/?s={query}&post_type=anime").format(query=urllib.parse.quote(query))
+        html_page = curl_get(f"{base}{search_path}")
 
-def search_otakudesu(query):
-    """Search for anime on Otakudesu using resilient DOM tokenization."""
-    otakudesu_base = get_base_url("otakudesu")
-    rules = get_rules()
-    search_path = rules.get("otakudesu", {}).get("search_path", "/?s={query}&post_type=anime").format(query=urllib.parse.quote(query))
-    url = f"{otakudesu_base}{search_path}"
-    html_page = curl_get(url)
+        parser = DOMParser()
+        parser.feed(html_page)
 
-    results = []
-    seen = set()
+        results = []
+        seen = set()
+        for l in parser.links:
+            href = l["href"]
+            if "/anime/" in href and href not in seen:
+                t = l["text"] or l["title"]
+                if t and len(t) > 3 and not any(k in t.lower() for k in ["home", "anime list", "jadwal", "ongoing"]):
+                    seen.add(href)
+                    clean = t.replace("&#8211;", "-").replace("&amp;", "&").strip()
+                    results.append({
+                        "title": f"{clean} [{self.display_name}]",
+                        "raw_title": clean,
+                        "url": href,
+                        "provider": self.name
+                    })
 
-    # Tier 1: DOM Tokenizer link extraction matching /anime/
-    parser = DOMParser()
-    parser.feed(html_page)
-    for l in parser.links:
-        href = l["href"]
-        if "/anime/" in href and href not in seen:
-            t = l["text"] or l["title"]
-            if t and len(t) > 3 and not any(k in t.lower() for k in ["home", "anime list", "jadwal", "ongoing"]):
-                seen.add(href)
-                clean = t.replace("&#8211;", "-").replace("&amp;", "&").strip()
-                results.append({
-                    "title": f"{clean} [Otakudesu]",
-                    "raw_title": clean,
-                    "url": href,
-                    "provider": "otakudesu"
-                })
+        if not results:
+            matches = re.findall(r'<h2><a href="([^"]+)"[^>]*>([^<]+)</a></h2>', html_page)
+            for link, title in matches:
+                if link not in seen:
+                    seen.add(link)
+                    clean = title.replace("&#8211;", "-").replace("&amp;", "&").strip()
+                    results.append({
+                        "title": f"{clean} [{self.display_name}]",
+                        "raw_title": clean,
+                        "url": link,
+                        "provider": self.name
+                    })
 
-    # Tier 2: Regex Fallback
-    if not results:
-        matches = re.findall(r'<h2><a href="([^"]+)"[^>]*>([^<]+)</a></h2>', html_page)
-        for link, title in matches:
-            if link not in seen:
-                seen.add(link)
-                clean = title.replace("&#8211;", "-").replace("&amp;", "&").strip()
-                results.append({
-                    "title": f"{clean} [Otakudesu]",
-                    "raw_title": clean,
-                    "url": link,
-                    "provider": "otakudesu"
-                })
-
-    # Tier 3: Catalog fallback if search returns few results
-    if len(results) < 3:
-        catalog = get_catalog()
-        q_lower = query.lower()
-        for c in catalog:
-            if q_lower in c["raw_title"].lower():
-                if not any(r["url"] == c["url"] for r in results):
+        if len(results) < 3:
+            catalog = self.get_catalog()
+            q_lower = query.lower()
+            for c in catalog:
+                if q_lower in c["raw_title"].lower() and not any(r["url"] == c["url"] for r in results):
                     results.append(c)
 
-    return results
+        return results
 
-def get_catalog():
-    """Get full anime index from Otakudesu with local cache."""
-    if CATALOG_CACHE_FILE.exists():
-        try:
-            mtime = CATALOG_CACHE_FILE.stat().st_mtime
-            if time.time() - mtime < 86400: # 24h cache
-                with open(CATALOG_CACHE_FILE, "r") as f:
-                    return json.load(f)
-        except Exception:
-            pass
+    def get_catalog(self) -> list[dict]:
+        if CATALOG_CACHE_FILE.exists():
+            try:
+                mtime = CATALOG_CACHE_FILE.stat().st_mtime
+                if time.time() - mtime < 86400:
+                    with open(CATALOG_CACHE_FILE, "r") as f:
+                        return json.load(f)
+            except Exception:
+                pass
 
-    otakudesu_base = get_base_url("otakudesu")
-    rules = get_rules()
-    catalog_path = rules.get("otakudesu", {}).get("catalog_path", "/anime-list/")
-    html_page = curl_get(f"{otakudesu_base}{catalog_path}")
+        base = get_base_url(self.name)
+        rules = get_rules()
+        catalog_path = rules.get(self.name, {}).get("catalog_path", "/anime-list/")
+        html_page = curl_get(f"{base}{catalog_path}")
 
-    parser = DOMParser()
-    parser.feed(html_page)
+        parser = DOMParser()
+        parser.feed(html_page)
 
-    catalog = []
-    seen = set()
-    for l in parser.links:
-        href = l["href"]
-        if "/anime/" in href and href not in seen:
-            t = l["text"]
-            if t and len(t) > 2:
+        catalog = []
+        seen = set()
+        for l in parser.links:
+            href = l["href"]
+            if "/anime/" in href and href not in seen:
+                t = l["text"]
+                if t and len(t) > 2:
+                    seen.add(href)
+                    clean = t.replace("&#8211;", "-").replace("&amp;", "&").strip()
+                    catalog.append({
+                        "title": f"{clean} [{self.display_name}]",
+                        "raw_title": clean,
+                        "url": href,
+                        "provider": self.name
+                    })
+
+        if catalog:
+            try:
+                with open(CATALOG_CACHE_FILE, "w") as f:
+                    json.dump(catalog, f)
+            except Exception:
+                pass
+        return catalog
+
+    def get_ongoing(self) -> list[dict]:
+        base = get_base_url(self.name)
+        rules = get_rules()
+        ongoing_path = rules.get(self.name, {}).get("ongoing_path", "/ongoing-anime/")
+        html_page = curl_get(f"{base}{ongoing_path}")
+
+        parser = DOMParser()
+        parser.feed(html_page)
+
+        items = []
+        seen = set()
+        for link in parser.links:
+            href = link["href"]
+            if "/anime/" in href and href not in seen:
+                t = link["text"] or link["title"]
+                if t and len(t) > 3 and "ongoing" not in t.lower():
+                    seen.add(href)
+                    clean = t.replace("&#8211;", "-").replace("&amp;", "&").strip()
+                    items.append({
+                        "title": f"{clean} (Ongoing) [{self.display_name}]",
+                        "raw_title": clean,
+                        "url": href,
+                        "provider": self.name
+                    })
+
+        if len(items) < 3:
+            for m in re.finditer(r'<div class=[\'"]thumb[\'"]><a href=[\'"]([^\'"]+)[\'"].*?<h2 class=[\'"]jdlflm[\'"]>([^<]+)</h2>', html_page, re.DOTALL):
+                url = m.group(1).strip()
+                if url not in seen:
+                    seen.add(url)
+                    clean = m.group(2).replace("&#8211;", "-").replace("&amp;", "&").strip()
+                    items.append({
+                        "title": f"{clean} (Ongoing) [{self.display_name}]",
+                        "raw_title": clean,
+                        "url": url,
+                        "provider": self.name
+                    })
+        return items
+
+    def get_episodes(self, anime_url: str) -> list[dict]:
+        html_page = curl_get(anime_url)
+        rules = get_rules()
+        anchor = rules.get(self.name, {}).get("episode_anchor", "/episode/")
+
+        parser = DOMParser()
+        parser.feed(html_page)
+
+        episodes = []
+        seen = set()
+        for l in parser.links:
+            href = l["href"]
+            if anchor in href and href not in seen:
                 seen.add(href)
-                clean = t.replace("&#8211;", "-").replace("&amp;", "&").strip()
-                catalog.append({
-                    "title": f"{clean} [Otakudesu]",
-                    "raw_title": clean,
+                text = l["text"] or l["title"]
+                clean_title = text.replace("&#8211;", "-").replace("&amp;", "&").replace("Subtitle Indonesia", "").strip()
+                num_m = re.search(r'Episode\s*(\d+(?:\.\d+)?)', clean_title, re.IGNORECASE)
+                ep_num = float(num_m.group(1)) if num_m else 0
+                episodes.append({
+                    "title": clean_title,
                     "url": href,
-                    "provider": "otakudesu"
+                    "ep_num": ep_num,
+                    "provider": self.name
                 })
 
-    if catalog:
-        try:
-            with open(CATALOG_CACHE_FILE, "w") as f:
-                json.dump(catalog, f)
-        except Exception:
-            pass
+        episodes.sort(key=lambda x: x["ep_num"] if x["ep_num"] > 0 else 9999)
+        return episodes
 
-    return catalog
+    def extract_streams(self, ep_url: str) -> list[dict]:
+        html_page = curl_get(ep_url)
+        candidates = []
+
+        # 1. Direct odcloud / desustream
+        iframes = re.findall(r'<iframe[^>]+src="([^"]+)"', html_page)
+        for ifr in iframes:
+            if "desustream" in ifr or "odcdn" in ifr:
+                try:
+                    ifr_html = curl_get(ifr, referer=ep_url, timeout=4)
+                    v_urls = re.findall(r'videoURL\s*=\s*["\']([^"\']+)["\']', ifr_html)
+                    for v in v_urls:
+                        candidates.append({
+                            "quality": "720p",
+                            "server": "ODCloud",
+                            "is_hls": False,
+                            "resolve_fn": lambda v_url=v: (v_url, None)
+                        })
+                except Exception:
+                    pass
+
+        # 2. Download section mirrors (Filedon, Pixeldrain)
+        m = re.search(r'<div class="download">(.*?)</div>', html_page, re.DOTALL)
+        if m:
+            for li in re.findall(r'<li>(.*?)</li>', m.group(1), re.DOTALL):
+                q_m = re.search(r'<strong>(.*?)</strong>', li)
+                quality = q_m.group(1).strip() if q_m else "720p"
+                links = re.findall(r'<a href="([^"]+)"[^>]*>([^<]+)</a>', li)
+                for href, host in links:
+                    host_clean = host.strip()
+                    if host_clean in ["Filedon"]:
+                        candidates.append({
+                            "quality": quality,
+                            "server": "Filedon",
+                            "is_hls": False,
+                            "resolve_fn": lambda h=href: resolve_filedon(h)
+                        })
+                    elif host_clean in ["Pdrain", "Pixeldrain", "PDrain"]:
+                        candidates.append({
+                            "quality": quality,
+                            "server": "Pixeldrain",
+                            "is_hls": False,
+                            "resolve_fn": lambda h=href: resolve_pixeldrain(h)
+                        })
+
+        # 3. Mirrorstream section (YourUpload, Filedon, VidHide, etc.)
+        actions = re.findall(r'action:"([a-f0-9]{32})"', html_page)
+        mirrors = re.findall(r'<a\s+href="#"\s+data-content="([^"]+)">([^<]+)</a>', html_page)
+        for b64, name in mirrors:
+            try:
+                payload = json.loads(base64.b64decode(b64).decode("utf-8"))
+                quality = payload.get("q", "720p")
+                clean_name = name.strip()
+                if any(k in clean_name.lower() for k in ["yourupload", "filedon", "vidhide", "odstream", "ondesuhd"]):
+                    candidates.append({
+                        "quality": quality,
+                        "server": f"{clean_name.title()} (Mirror)",
+                        "is_hls": False,
+                        "resolve_fn": lambda b=b64, n=clean_name: resolve_mirror_stream(ep_url, b, n, actions)
+                    })
+            except Exception:
+                pass
+
+        return candidates
+
+class NontonAnimeProvider(BaseProvider):
+    """Provider implementation for NontonAnime (Classic 90s-2000s Anime & Vintage Archive)."""
+    name = "nontonanime"
+    display_name = "NontonAnime"
+
+    def search(self, query: str) -> list[dict]:
+        base = get_base_url(self.name)
+        rules = get_rules()
+        search_path = rules.get(self.name, {}).get("search_path", "/?s={query}").format(query=urllib.parse.quote(query))
+        html_page = curl_get(f"{base}{search_path}")
+
+        parser = DOMParser()
+        parser.feed(html_page)
+
+        results = []
+        seen = set()
+        anime_anchor = rules.get(self.name, {}).get("anime_anchor", "/anime/")
+
+        for l in parser.links:
+            href = l["href"]
+            if anime_anchor in href and href not in seen:
+                raw_title = l["text"] or l["title"] or "Unknown"
+                if len(raw_title) > 2:
+                    seen.add(href)
+                    clean = re.sub(r'[\r\n\t]+', ' ', raw_title).strip()
+                    results.append({
+                        "title": f"{clean} [{self.display_name}]",
+                        "raw_title": clean,
+                        "url": href,
+                        "provider": self.name
+                    })
+
+        return results
+
+    def get_episodes(self, anime_url: str) -> list[dict]:
+        html_page = curl_get(anime_url)
+        rules = get_rules()
+        anchor = rules.get(self.name, {}).get("episode_anchor", "/nonton/")
+
+        parser = DOMParser()
+        parser.feed(html_page)
+
+        episodes = {}
+        for l in parser.links:
+            href = l["href"]
+            if anchor in href:
+                m = re.search(r'episode-(\d+(?:\.\d+)?)', href)
+                if m:
+                    ep_num = float(m.group(1))
+                    if ep_num not in episodes:
+                        clean_title = f"Episode {int(ep_num) if ep_num.is_integer() else ep_num}"
+                        episodes[ep_num] = {
+                            "title": clean_title,
+                            "url": href,
+                            "ep_num": ep_num,
+                            "provider": self.name
+                        }
+
+        sorted_eps = [episodes[k] for k in sorted(episodes.keys())]
+        return sorted_eps
+
+    def extract_streams(self, ep_url: str) -> list[dict]:
+        html_page = curl_get(ep_url)
+        candidates = []
+
+        parser = DOMParser()
+        parser.feed(html_page)
+
+        for ifr in parser.iframes:
+            if "putarin" in ifr or "puterin" in ifr:
+                domain = urllib.parse.urlparse(ifr).netloc
+                candidates.append({
+                    "quality": "Adaptive HD",
+                    "server": f"Putarin ({domain})",
+                    "is_hls": True,
+                    "resolve_fn": lambda u=ifr: resolve_putarin(u)
+                })
+
+        return candidates
+
+class ProviderRegistry:
+    """Registry that manages modular anime providers and provides concurrent multi-provider search."""
+    def __init__(self):
+        self._providers: dict[str, BaseProvider] = {}
+
+    def register(self, provider: BaseProvider):
+        self._providers[provider.name] = provider
+
+    def get(self, name: str) -> BaseProvider | None:
+        return self._providers.get(name)
+
+    def all(self) -> list[BaseProvider]:
+        return list(self._providers.values())
+
+    def names(self) -> list[str]:
+        return list(self._providers.keys())
+
+    def search_all(self, query: str, active_provider: str = "all") -> list[dict]:
+        log_info(f"Mencari '{query}'...")
+        if active_provider in self._providers:
+            return self._providers[active_provider].search(query)
+
+        results = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(self._providers)) as executor:
+            futures = {executor.submit(p.search, query): p for p in self._providers.values()}
+            for f in concurrent.futures.as_completed(futures):
+                try:
+                    res = f.result()
+                    if res:
+                        results.extend(res)
+                except Exception:
+                    pass
+        return results
+
+    def find_cross_provider_fallback(self, anime_raw_title: str, ep_num: float, exclude_provider: str) -> tuple[dict | None, list[dict]]:
+        """
+        Cross-Provider Episode Stream Fallback:
+        Searches other providers for the same anime title & episode number if the current provider fails!
+        """
+        log_warn(f"Mencari cadangan lintas penyedia (Cross-Provider Fallback)...")
+        for p_name, provider in self._providers.items():
+            if p_name == exclude_provider:
+                continue
+            try:
+                matches = provider.search(anime_raw_title)
+                if not matches:
+                    continue
+                # Pick the best match
+                alt_anime = matches[0]
+                eps = provider.get_episodes(alt_anime["url"])
+                matched_ep = next((e for e in eps if e["ep_num"] == ep_num), None)
+                if matched_ep:
+                    cands = provider.extract_streams(matched_ep["url"])
+                    if cands:
+                        log_success(f"Menemukan mirror cadangan di {provider.display_name} untuk Episode {ep_num}!")
+                        return matched_ep, cands
+            except Exception:
+                pass
+        return None, []
+
+# Initialize Registry and Register Providers
+REGISTRY = ProviderRegistry()
+REGISTRY.register(OtakudesuProvider())
+REGISTRY.register(NontonAnimeProvider())
+
+# Helper functions for backward compatibility with existing tests
+def search_anime(query, provider="all"):
+    return REGISTRY.search_all(query, provider)
+
+def search_otakudesu(query):
+    return REGISTRY.get("otakudesu").search(query)
 
 def search_nontonanime(query):
-    """Search for anime on NontonAnime using resilient DOM tokenization."""
-    nonton_base = get_base_url("nontonanime")
-    rules = get_rules()
-    search_path = rules.get("nontonanime", {}).get("search_path", "/?s={query}").format(query=urllib.parse.quote(query))
-    url = f"{nonton_base}{search_path}"
-    html_page = curl_get(url)
+    return REGISTRY.get("nontonanime").search(query)
 
-    parser = DOMParser()
-    parser.feed(html_page)
+def get_otakudesu_episodes(url):
+    return REGISTRY.get("otakudesu").get_episodes(url)
 
-    results = []
-    seen = set()
-    anime_anchor = rules.get("nontonanime", {}).get("anime_anchor", "/anime/")
+def get_nontonanime_episodes(url):
+    return REGISTRY.get("nontonanime").get_episodes(url)
 
-    for l in parser.links:
-        href = l["href"]
-        if anime_anchor in href and href not in seen:
-            raw_title = l["text"] or l["title"] or "Unknown"
-            if len(raw_title) > 2:
-                seen.add(href)
-                clean = re.sub(r'[\r\n\t]+', ' ', raw_title).strip()
-                results.append({
-                    "title": f"{clean} [NontonAnime]",
-                    "raw_title": clean,
-                    "url": href,
-                    "provider": "nontonanime"
-                })
+def extract_otakudesu_candidates(url):
+    return REGISTRY.get("otakudesu").extract_streams(url)
 
-    return results
+def extract_nontonanime_candidates(url):
+    return REGISTRY.get("nontonanime").extract_streams(url)
 
-def search_anime(query, provider="all"):
-    """Search for anime across sources concurrently."""
-    log_info(f"Mencari '{query}'...")
-    results = []
-
-    if provider == "otakudesu":
-        return search_otakudesu(query)
-    elif provider == "nontonanime":
-        return search_nontonanime(query)
-
-    # Concurrently search both providers
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-        f_otaku = executor.submit(search_otakudesu, query)
-        f_nonton = executor.submit(search_nontonanime, query)
-        try:
-            results.extend(f_otaku.result())
-        except Exception:
-            pass
-        try:
-            results.extend(f_nonton.result())
-        except Exception:
-            pass
-
-    return results
+def get_ongoing_anime():
+    otaku = REGISTRY.get("otakudesu")
+    return otaku.get_ongoing() if otaku else []
 
 def validate_episodes(episodes):
-    """Data Contract Validation: ensures episode list is non-empty and well-formed."""
     if not episodes or not isinstance(episodes, list):
         return False
     valid = 0
@@ -726,187 +916,39 @@ def validate_episodes(episodes):
             valid += 1
     return valid > 0
 
-def get_otakudesu_episodes(anime_url):
-    """Fetch Otakudesu episodes list using DOMParser with semantic anchor."""
-    html_page = curl_get(anime_url)
-    rules = get_rules()
-    anchor = rules.get("otakudesu", {}).get("episode_anchor", "/episode/")
-
-    parser = DOMParser()
-    parser.feed(html_page)
-
-    episodes = []
-    seen = set()
-    for l in parser.links:
-        href = l["href"]
-        if anchor in href and href not in seen:
-            seen.add(href)
-            text = l["text"] or l["title"]
-            clean_title = text.replace("&#8211;", "-").replace("&amp;", "&").replace("Subtitle Indonesia", "").strip()
-            num_m = re.search(r'Episode\s*(\d+(?:\.\d+)?)', clean_title, re.IGNORECASE)
-            ep_num = float(num_m.group(1)) if num_m else 0
-            episodes.append({
-                "title": clean_title,
-                "url": href,
-                "ep_num": ep_num,
-                "provider": "otakudesu"
-            })
-
-    episodes.sort(key=lambda x: x["ep_num"] if x["ep_num"] > 0 else 9999)
-    return episodes
-
-def get_nontonanime_episodes(anime_url):
-    """Fetch NontonAnime episodes list using DOMParser with semantic anchor."""
-    html_page = curl_get(anime_url)
-    rules = get_rules()
-    anchor = rules.get("nontonanime", {}).get("episode_anchor", "/nonton/")
-
-    parser = DOMParser()
-    parser.feed(html_page)
-
-    episodes = {}
-    for l in parser.links:
-        href = l["href"]
-        if anchor in href:
-            m = re.search(r'episode-(\d+(?:\.\d+)?)', href)
-            if m:
-                ep_num = float(m.group(1))
-                if ep_num not in episodes:
-                    clean_title = f"Episode {int(ep_num) if ep_num.is_integer() else ep_num}"
-                    episodes[ep_num] = {
-                        "title": clean_title,
-                        "url": href,
-                        "ep_num": ep_num,
-                        "provider": "nontonanime"
-                    }
-
-    sorted_eps = [episodes[k] for k in sorted(episodes.keys())]
-    return sorted_eps
-
 def get_anime_details(anime_item):
-    """Fetch anime episodes with data contract validation and automatic provider failover."""
     log_info("Mengambil daftar episode...")
-    provider = anime_item.get("provider")
-    url = anime_item.get("url", "")
-    
-    if provider == "nontonanime" or "nontonanime" in url:
-        eps = get_nontonanime_episodes(url)
-    else:
-        eps = get_otakudesu_episodes(url)
+    provider_name = anime_item.get("provider", "otakudesu")
+    provider = REGISTRY.get(provider_name) or REGISTRY.get("otakudesu")
+    eps = provider.get_episodes(anime_item["url"])
 
-    # Contract validation: if parsing failed, attempt self-healing search failover
+    # Failover: if episodes empty, try alternate provider
     if not validate_episodes(eps):
         log_warn("Daftar episode tidak ditemukan pada penyedia saat ini. Mencoba failover...")
-        alt_provider = "nontonanime" if provider == "otakudesu" else "otakudesu"
         raw_title = anime_item.get("raw_title", "")
         if raw_title:
-            alt_results = search_anime(raw_title, provider=alt_provider)
-            if alt_results:
-                log_info(f"Ditemukan alternatif di {alt_provider.title()}: {alt_results[0]['title']}")
-                anime_item["url"] = alt_results[0]["url"]
-                anime_item["provider"] = alt_provider
-                if alt_provider == "nontonanime":
-                    eps = get_nontonanime_episodes(anime_item["url"])
-                else:
-                    eps = get_otakudesu_episodes(anime_item["url"])
-
+            for alt_name, alt_prov in REGISTRY._providers.items():
+                if alt_name == provider_name:
+                    continue
+                alt_res = alt_prov.search(raw_title)
+                if alt_res:
+                    log_info(f"Ditemukan alternatif di {alt_prov.display_name}: {alt_res[0]['title']}")
+                    anime_item["url"] = alt_res[0]["url"]
+                    anime_item["provider"] = alt_name
+                    eps = alt_prov.get_episodes(alt_res[0]["url"])
+                    if validate_episodes(eps):
+                        break
     return eps
 
-def extract_otakudesu_candidates(ep_url):
-    """Extract stream candidate sources for Otakudesu."""
-    html_page = curl_get(ep_url)
-    candidates = []
-
-    # 1. Direct odcloud / desustream
-    iframes = re.findall(r'<iframe[^>]+src="([^"]+)"', html_page)
-    for ifr in iframes:
-        if "desustream" in ifr or "odcdn" in ifr:
-            try:
-                ifr_html = curl_get(ifr, referer=ep_url, timeout=4)
-                v_urls = re.findall(r'videoURL\s*=\s*["\']([^"\']+)["\']', ifr_html)
-                for v in v_urls:
-                    candidates.append({
-                        "quality": "720p",
-                        "server": "ODCloud",
-                        "is_hls": False,
-                        "resolve_fn": lambda v_url=v: (v_url, None)
-                    })
-            except Exception:
-                pass
-
-    # 2. Download section mirrors (Filedon, Pixeldrain)
-    m = re.search(r'<div class="download">(.*?)</div>', html_page, re.DOTALL)
-    if m:
-        for li in re.findall(r'<li>(.*?)</li>', m.group(1), re.DOTALL):
-            q_m = re.search(r'<strong>(.*?)</strong>', li)
-            quality = q_m.group(1).strip() if q_m else "720p"
-            links = re.findall(r'<a href="([^"]+)"[^>]*>([^<]+)</a>', li)
-            for href, host in links:
-                host_clean = host.strip()
-                if host_clean in ["Filedon"]:
-                    candidates.append({
-                        "quality": quality,
-                        "server": "Filedon",
-                        "is_hls": False,
-                        "resolve_fn": lambda h=href: resolve_filedon(h)
-                    })
-                elif host_clean in ["Pdrain", "Pixeldrain", "PDrain"]:
-                    candidates.append({
-                        "quality": quality,
-                        "server": "Pixeldrain",
-                        "is_hls": False,
-                        "resolve_fn": lambda h=href: resolve_pixeldrain(h)
-                    })
-
-    # 3. Mirrorstream section (YourUpload, Filedon, VidHide, etc.)
-    actions = re.findall(r'action:"([a-f0-9]{32})"', html_page)
-    mirrors = re.findall(r'<a\s+href="#"\s+data-content="([^"]+)">([^<]+)</a>', html_page)
-    for b64, name in mirrors:
-        try:
-            payload = json.loads(base64.b64decode(b64).decode("utf-8"))
-            quality = payload.get("q", "720p")
-            clean_name = name.strip()
-            if any(k in clean_name.lower() for k in ["yourupload", "filedon", "vidhide", "odstream", "ondesuhd"]):
-                candidates.append({
-                    "quality": quality,
-                    "server": f"{clean_name.title()} (Mirror)",
-                    "is_hls": False,
-                    "resolve_fn": lambda b=b64, n=clean_name: resolve_mirror_stream(ep_url, b, n, actions)
-                })
-        except Exception:
-            pass
-
-    return candidates
-
-def extract_nontonanime_candidates(ep_url):
-    """Extract stream candidates for NontonAnime (Putarin HLS streams)."""
-    html_page = curl_get(ep_url)
-    candidates = []
-
-    parser = DOMParser()
-    parser.feed(html_page)
-
-    for ifr in parser.iframes:
-        if "putarin" in ifr or "puterin" in ifr:
-            domain = urllib.parse.urlparse(ifr).netloc
-            candidates.append({
-                "quality": "Adaptive HD",
-                "server": f"Putarin ({domain})",
-                "is_hls": True,
-                "resolve_fn": lambda u=ifr: resolve_putarin(u)
-            })
-
-    return candidates
-
 def extract_stream_candidates(ep_item):
-    """Extract stream candidates based on episode provider."""
     log_info("Mengekstrak opsi mirror Sub Indo...")
-    provider = ep_item.get("provider")
-    url = ep_item.get("url", "")
-    if provider == "nontonanime" or "nontonanime" in url:
-        return extract_nontonanime_candidates(url)
-    return extract_otakudesu_candidates(url)
+    provider_name = ep_item.get("provider", "otakudesu")
+    provider = REGISTRY.get(provider_name) or REGISTRY.get("otakudesu")
+    return provider.extract_streams(ep_item["url"])
 
+# ==============================================================================
+# 5. VIDEO PLAYER & DOWNLOAD ENGINE
+# ==============================================================================
 def play_video(url, title, quality_label="", referer=None, is_hls=False):
     """Play video stream via MPV with optional local HLS proxy."""
     log_success(f"Memutar: {title} ({quality_label})")
@@ -970,7 +1012,6 @@ def download_video(url, title, quality_label="", referer=None, is_hls=False):
     log_info(f"Mengunduh ke: {dest_path}")
 
     if is_hls:
-        # HLS stream: prefer yt-dlp
         cmd = ["yt-dlp", "--progress", "-o", str(dest_path)]
         if referer:
             cmd.extend(["--referer", referer])
@@ -981,13 +1022,11 @@ def download_video(url, title, quality_label="", referer=None, is_hls=False):
                 log_success(f"Selesai mengunduh: {dest_path}")
                 return
         except FileNotFoundError:
-            # Fallback to ffmpeg
             cmd = ["ffmpeg", "-y", "-headers", f"Referer: {referer}\r\nUser-Agent: {USER_AGENT}\r\n", "-i", url, "-c", "copy", str(dest_path)]
             subprocess.run(cmd)
             log_success(f"Selesai mengunduh: {dest_path}")
             return
 
-    # Direct MP4 stream: use curl
     dl_cmd = ["curl", "-L", "-H", f"User-Agent: {USER_AGENT}"]
     if referer:
         dl_cmd.extend(["-H", f"Referer: {referer}"])
@@ -995,8 +1034,10 @@ def download_video(url, title, quality_label="", referer=None, is_hls=False):
     subprocess.run(dl_cmd)
     log_success(f"Selesai mengunduh: {dest_path}")
 
+# ==============================================================================
+# 6. HISTORY & PERSISTENCE
+# ==============================================================================
 def save_history(anime_title, anime_url, episode_title, episode_num, episode_url, provider):
-    """Save watch history to JSON."""
     history = {}
     if HISTORY_FILE.exists():
         try:
@@ -1022,7 +1063,6 @@ def save_history(anime_title, anime_url, episode_title, episode_num, episode_url
         pass
 
 def load_history():
-    """Load watch history sorted by recent."""
     if not HISTORY_FILE.exists():
         return []
     try:
@@ -1034,7 +1074,12 @@ def load_history():
     except Exception:
         return []
 
+# ==============================================================================
+# 7. MAIN CONTROLLER & SELECTION INTERACTION
+# ==============================================================================
 def main():
+    provider_choices = ["all"] + REGISTRY.names()
+
     parser = argparse.ArgumentParser(
         prog="anindo",
         description="anindo - Streaming Anime Subtitle Indonesia via Terminal (CLI)",
@@ -1044,7 +1089,7 @@ def main():
     parser.add_argument("query", nargs="?", help="Judul anime yang dicari (misal: 'initial d', 'frieren')")
     parser.add_argument("-e", "--episode", type=float, help="Nomor episode langsung (misal: -e 10)")
     parser.add_argument("-q", "--quality", choices=["360", "480", "720", "1080", "best"], default="best", help="Kualitas video (default: best)")
-    parser.add_argument("-p", "--provider", choices=["all", "otakudesu", "nontonanime"], default="all", help="Pilih sumber data anime (default: all)")
+    parser.add_argument("-p", "--provider", choices=provider_choices, default="all", help="Pilih penyedia anime (default: all)")
     parser.add_argument("-o", "--ongoing", action="store_true", help="Pilih dari daftar anime on-going terbaru")
     parser.add_argument("-c", "--continue-watch", dest="continue_watch", action="store_true", help="Lanjutkan anime dari riwayat terakhir")
     parser.add_argument("-d", "--download", action="store_true", help="Unduh video ke lokal alih-alih memutar")
@@ -1066,10 +1111,9 @@ def main():
                 DOMAINS_CACHE_FILE.unlink()
             except Exception:
                 pass
-        d_otaku = get_base_url("otakudesu", force_refresh=True)
-        d_nonton = get_base_url("nontonanime", force_refresh=True)
-        log_success(f"Otakudesu aktif   : {d_otaku}")
-        log_success(f"NontonAnime aktif : {d_nonton}")
+        for p in REGISTRY.all():
+            domain = get_base_url(p.name, force_refresh=True)
+            log_success(f"{p.display_name:<16}: {domain}")
         return
 
     selected_anime = None
@@ -1158,8 +1202,9 @@ def main():
         return
 
     clean_disp_title = selected_anime.get("raw_title", selected_anime["title"])
-    prov_name = selected_anime.get("provider", "otakudesu").title()
-    log_success(f"Memilih: {clean_disp_title} ({prov_name})")
+    prov_obj = REGISTRY.get(selected_anime.get("provider"))
+    prov_display = prov_obj.display_name if prov_obj else "Unknown"
+    log_success(f"Memilih: {clean_disp_title} ({prov_display})")
 
     episodes = get_anime_details(selected_anime)
     if not episodes:
@@ -1184,30 +1229,37 @@ def main():
             return
         cur_ep_idx = episodes.index(selected_ep)
 
-    # Main streaming loop (supports auto-next episode and mirror fallback)
+    # Main streaming loop (with auto-next episode and Cross-Provider Fallback!)
     while cur_ep_idx < len(episodes):
         ep = episodes[cur_ep_idx]
         log_info(f"Memproses {ep['title']}...")
         candidates = extract_stream_candidates(ep)
-        if not candidates:
-            log_err(f"Tidak ada server video yang ditemukan untuk {ep['title']}.")
-            if cur_ep_idx + 1 < len(episodes):
-                try:
-                    c = input("Coba episode selanjutnya? [Y/n]: ").strip().lower()
-                    if c in ("", "y", "ya", "yes"):
-                        cur_ep_idx += 1
-                        continue
-                except (EOFError, KeyboardInterrupt):
-                    pass
-            break
 
-        # Ranking function based on user quality preference and server reliability
+        # Cross-Provider Fallback if no stream candidates found on current provider
+        if not candidates:
+            log_warn(f"Server tidak ditemukan di {prov_display} untuk {ep['title']}.")
+            matched_alt_ep, alt_cands = REGISTRY.find_cross_provider_fallback(clean_disp_title, ep["ep_num"], selected_anime["provider"])
+            if alt_cands:
+                candidates = alt_cands
+                ep = matched_alt_ep or ep
+            else:
+                log_err(f"Semua penyedia gagal menemukan server untuk {ep['title']}.")
+                if cur_ep_idx + 1 < len(episodes):
+                    try:
+                        c = input("Coba episode selanjutnya? [Y/n]: ").strip().lower()
+                        if c in ("", "y", "ya", "yes"):
+                            cur_ep_idx += 1
+                            continue
+                    except (EOFError, KeyboardInterrupt):
+                        pass
+                break
+
+        # Ranking candidates by score
         def score_candidate(c):
             s = 0
             q = c["quality"]
-            if args.quality != "best":
-                if args.quality in q:
-                    s += 1000
+            if args.quality != "best" and args.quality in q:
+                s += 1000
             if "1080" in q: s += 300
             elif "720" in q or "adaptive" in q.lower() or "hd" in q.lower(): s += 200
             elif "480" in q: s += 100
@@ -1232,7 +1284,7 @@ def main():
             log_info(f"Mencoba server {s_name} ({s_qual})...")
             stream_url, ref = cand["resolve_fn"]()
             if not stream_url:
-                log_warn(f"Server {s_name} ({s_qual}) tidak tersedia, mencoba alternatif berikutnya...")
+                log_warn(f"Server {s_name} ({s_qual}) tidak tersedia, mencoba alternatif...")
                 continue
 
             save_history(
@@ -1257,8 +1309,32 @@ def main():
                 else:
                     log_warn(f"Pemutaran video terputus atau gagal di {s_name}, mencoba server lain...")
 
+        # If all candidates on current provider failed to play, attempt Cross-Provider Fallback!
         if not played_successfully:
-            log_err(f"Semua server alternatif untuk {ep['title']} gagal dimuat.")
+            log_warn(f"Semua server di {prov_display} gagal memutar {ep['title']}.")
+            matched_alt_ep, alt_cands = REGISTRY.find_cross_provider_fallback(clean_disp_title, ep["ep_num"], selected_anime["provider"])
+            if alt_cands:
+                alt_cands.sort(key=score_candidate, reverse=True)
+                for cand in alt_cands:
+                    s_name = cand["server"]
+                    s_qual = cand["quality"]
+                    is_hls = cand.get("is_hls", False)
+                    log_info(f"Mencoba server cadangan lintas penyedia: {s_name} ({s_qual})...")
+                    stream_url, ref = cand["resolve_fn"]()
+                    if stream_url:
+                        full_title = f"{clean_disp_title} - {ep['title']} (Fallback)"
+                        if args.download:
+                            download_video(stream_url, full_title, s_qual, referer=ref, is_hls=is_hls)
+                            played_successfully = True
+                            break
+                        else:
+                            ok = play_video(stream_url, full_title, f"{s_qual} - {s_name}", referer=ref, is_hls=is_hls)
+                            if ok:
+                                played_successfully = True
+                                break
+
+        if not played_successfully:
+            log_err(f"Semua server alternatif di semua penyedia gagal memuat {ep['title']}.")
 
         # Next episode prompt
         if cur_ep_idx + 1 < len(episodes):
