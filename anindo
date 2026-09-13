@@ -16,6 +16,7 @@ import subprocess
 import urllib.parse
 import urllib.request
 import time
+import socket
 import threading
 import concurrent.futures
 from abc import ABC, abstractmethod
@@ -1001,6 +1002,49 @@ def play_video(url, title, quality_label="", referer=None, is_hls=False):
             log_warn(f"Gagal menyiapkan pemutar HLS lokal: {e}")
             return False
 
+def format_time(seconds):
+    """Format seconds into HH:MM:SS or MM:SS."""
+    if not seconds or seconds < 0:
+        return "00:00"
+    s = int(seconds)
+    m, s = divmod(s, 60)
+    h, m = divmod(m, 60)
+    if h > 0:
+        return f"{h:02d}:{m:02d}:{s:02d}"
+    return f"{m:02d}:{s:02d}"
+
+def play_video(url, title, quality_label="", referer=None, is_hls=False, start_pos=0):
+    """Play video stream with MPV and real-time playback state tracking."""
+    server = None
+    stream_to_play = url
+
+    if is_hls:
+        try:
+            raw_m3u8 = curl_get(url, referer=referer, timeout=10)
+            if not raw_m3u8:
+                log_warn("Gagal mengunduh daftar putar m3u8.")
+                return False, {"status": "error", "time_pos": 0, "percent": 0, "duration": 0}
+            fixed_bytes = fix_m3u8_content(raw_m3u8, url)
+
+            class LocalM3U8Handler(BaseHTTPRequestHandler):
+                def do_GET(self):
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/vnd.apple.mpegurl")
+                    self.send_header("Content-Length", str(len(fixed_bytes)))
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    self.wfile.write(fixed_bytes)
+                def log_message(self, format, *args):
+                    pass
+
+            server = HTTPServer(("127.0.0.1", 0), LocalM3U8Handler)
+            port = server.server_address[1]
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            stream_to_play = f"http://127.0.0.1:{port}/stream.m3u8"
+        except Exception as e:
+            log_warn(f"Gagal menyiapkan pemutar HLS lokal: {e}")
+            return False, {"status": "error", "time_pos": 0, "percent": 0, "duration": 0}
+
     # Desktop notification asynchronously
     def send_notification():
         try:
@@ -1012,6 +1056,13 @@ def play_video(url, title, quality_label="", referer=None, is_hls=False):
             pass
     threading.Thread(target=send_notification, daemon=True).start()
 
+    sock_path = f"/tmp/anindo-mpv-{os.getpid()}.sock"
+    if os.path.exists(sock_path):
+        try:
+            os.unlink(sock_path)
+        except Exception:
+            pass
+
     mpv_cmd = [
         "mpv",
         f"--title=anindo: {title}",
@@ -1020,21 +1071,121 @@ def play_video(url, title, quality_label="", referer=None, is_hls=False):
         "--resume-playback=yes",
         "--save-position-on-quit=yes",
         "--keep-open=no",
-        "--input-ipc-server=/tmp/anindo-mpv.sock",
+        f"--input-ipc-server={sock_path}",
     ]
+    if start_pos and start_pos > 5:
+        mpv_cmd.append(f"--start={int(start_pos)}")
+        log_info(f"Melanjutkan dari menit {format_time(start_pos)}...")
+
     if referer:
         mpv_cmd.append(f"--referrer={referer}")
 
     mpv_cmd.append(stream_to_play)
 
+    playback_state = {"time_pos": 0.0, "percent": 0.0, "duration": 0.0}
+    stop_event = threading.Event()
+
+    def monitor_ipc():
+        s = None
+        for _ in range(40):
+            if os.path.exists(sock_path):
+                try:
+                    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    s.settimeout(0.5)
+                    s.connect(sock_path)
+                    break
+                except Exception:
+                    time.sleep(0.05)
+            time.sleep(0.05)
+        if not s:
+            return
+
+        while not stop_event.is_set():
+            try:
+                # Query percent-pos
+                s.sendall(b'{"command": ["get_property", "percent-pos"]}\n')
+                res = s.recv(1024).decode("utf-8", "ignore")
+                for line in res.strip().split("\n"):
+                    if line:
+                        try:
+                            d = json.loads(line)
+                            if isinstance(d.get("data"), (int, float)):
+                                playback_state["percent"] = d["data"]
+                        except Exception:
+                            pass
+
+                # Query time-pos
+                s.sendall(b'{"command": ["get_property", "time-pos"]}\n')
+                res = s.recv(1024).decode("utf-8", "ignore")
+                for line in res.strip().split("\n"):
+                    if line:
+                        try:
+                            d = json.loads(line)
+                            if isinstance(d.get("data"), (int, float)):
+                                playback_state["time_pos"] = d["data"]
+                        except Exception:
+                            pass
+
+                # Query duration
+                s.sendall(b'{"command": ["get_property", "duration"]}\n')
+                res = s.recv(1024).decode("utf-8", "ignore")
+                for line in res.strip().split("\n"):
+                    if line:
+                        try:
+                            d = json.loads(line)
+                            if isinstance(d.get("data"), (int, float)):
+                                playback_state["duration"] = d["data"]
+                        except Exception:
+                            pass
+            except Exception:
+                break
+            time.sleep(0.5)
+        try:
+            s.close()
+        except Exception:
+            pass
+
+    ipc_thread = threading.Thread(target=monitor_ipc, daemon=True)
+    ipc_thread.start()
+
     try:
-        ret = subprocess.run(mpv_cmd)
-        return ret.returncode == 0
+        proc = subprocess.Popen(mpv_cmd)
+        proc.wait()
+        ret_code = proc.returncode
     except KeyboardInterrupt:
-        return True
+        ret_code = 0
     finally:
+        stop_event.set()
+        ipc_thread.join(timeout=0.5)
+        if os.path.exists(sock_path):
+            try:
+                os.unlink(sock_path)
+            except Exception:
+                pass
         if server:
             server.shutdown()
+
+    final_percent = playback_state.get("percent", 0.0)
+    final_time = playback_state.get("time_pos", 0.0)
+    final_duration = playback_state.get("duration", 0.0)
+
+    # Threshold for completion: watched >= 85% or within 60s of ending
+    if final_percent >= 85.0 or (final_duration > 60 and (final_duration - final_time) <= 60):
+        status = "completed"
+        save_time = 0
+    elif final_time > 10.0:
+        status = "in_progress"
+        save_time = int(final_time)
+    else:
+        status = "not_started"
+        save_time = 0
+
+    return (ret_code == 0 or final_time > 0), {
+        "status": status,
+        "time_pos": save_time,
+        "percent": int(final_percent),
+        "duration": int(final_duration)
+    }
 
 def download_video(url, title, quality_label="", referer=None, is_hls=False):
     """Download video stream with tiered accelerators: aria2c -> yt-dlp -> curl."""
@@ -1124,7 +1275,8 @@ def download_video(url, title, quality_label="", referer=None, is_hls=False):
 # ==============================================================================
 # 6. HISTORY & PERSISTENCE
 # ==============================================================================
-def save_history(anime_title, anime_url, episode_title, episode_num, episode_url, provider):
+def save_history(anime_title, anime_url, episode_title, episode_num, episode_url, provider,
+                 status="in_progress", time_pos=0, percent=0, duration=0):
     history = {}
     if HISTORY_FILE.exists():
         try:
@@ -1143,7 +1295,11 @@ def save_history(anime_title, anime_url, episode_title, episode_num, episode_url
         "last_ep_url": episode_url,
         "provider": provider,
         "timestamp": now_ts,
-        "date_str": now_str
+        "date_str": now_str,
+        "status": status,
+        "time_pos": time_pos,
+        "percent": percent,
+        "duration": duration
     }
 
     try:
@@ -1300,6 +1456,7 @@ def main():
 
     selected_anime = None
     target_ep_num = args.episode
+    initial_start_pos = 0
 
     if args.history:
         hist = load_history()
@@ -1310,7 +1467,11 @@ def main():
         for i, h in enumerate(hist[:15], 1):
             prov_tag = f" [{h.get('provider', 'otakudesu').title()}]"
             date_info = f" ({h.get('date_str', '')})" if h.get("date_str") else ""
-            print(f" {i:2d}. {h['anime_title']}{prov_tag} - Terakhir: {h['last_ep_title']}{date_info}")
+            if h.get("status") == "in_progress" and h.get("time_pos", 0) > 0:
+                prog = f" [Dijeda di {format_time(h['time_pos'])} - {h.get('percent', 0)}%]"
+            else:
+                prog = " (Selesai)"
+            print(f" {i:2d}. {h['anime_title']}{prov_tag} - {h['last_ep_title']}{prog}{date_info}")
         return
 
     if args.ongoing:
@@ -1324,11 +1485,13 @@ def main():
         if not hist:
             log_warn("Tidak ada riwayat tontonan untuk dilanjutkan.")
             return
-        choice = fzf_select(
-            hist,
-            prompt="Lanjutkan Anime: ",
-            display_fn=lambda x: f"{x['anime_title']} (Terakhir: {x['last_ep_title']}) {('[' + x.get('date_str','') + ']') if x.get('date_str') else ''}"
-        )
+
+        def format_hist_choice(x):
+            p = f" [Dijeda di {format_time(x['time_pos'])} - {x.get('percent',0)}%]" if x.get("status") == "in_progress" and x.get("time_pos", 0) > 0 else " (Selesai)"
+            d = f" [{x.get('date_str','')}]" if x.get("date_str") else ""
+            return f"{x['anime_title']} - {x['last_ep_title']}{p}{d}"
+
+        choice = fzf_select(hist, prompt="Lanjutkan Anime: ", display_fn=format_hist_choice)
         if not choice:
             return
         selected_anime = {
@@ -1336,9 +1499,13 @@ def main():
             "url": choice["anime_url"],
             "provider": choice.get("provider", "otakudesu")
         }
-        # Smart next episode: auto-target episode X + 1
-        last_n = choice.get("last_ep_num", 0)
-        target_ep_num = (int(last_n) if isinstance(last_n, float) and last_n.is_integer() else last_n) + 1
+        ep_n = choice.get("last_ep_num", 1)
+        if choice.get("status") == "in_progress" and choice.get("time_pos", 0) > 0:
+            target_ep_num = ep_n
+            initial_start_pos = choice["time_pos"]
+        else:
+            target_ep_num = (int(ep_n) if isinstance(ep_n, float) and ep_n.is_integer() else ep_n) + 1
+            initial_start_pos = 0
     else:
         query = args.query
         if not query:
@@ -1346,16 +1513,30 @@ def main():
             menu_items = []
             if hist:
                 latest = hist[0]
-                last_num = latest.get("last_ep_num", 0)
-                last_str = str(int(last_num)) if isinstance(last_num, float) and last_num.is_integer() else str(last_num)
-                next_num = (int(last_num) if isinstance(last_num, float) and last_num.is_integer() else last_num) + 1
-                next_str = str(int(next_num)) if isinstance(next_num, float) and next_num.is_integer() else str(next_num)
+                ep_n = latest.get("last_ep_num", 1)
+                ep_str = str(int(ep_n)) if isinstance(ep_n, float) and ep_n.is_integer() else str(ep_n)
+                status = latest.get("status", "completed")
+                time_pos = latest.get("time_pos", 0)
+                percent = latest.get("percent", 0)
+
+                if status == "in_progress" and time_pos > 0:
+                    time_str = format_time(time_pos)
+                    target_num = ep_n
+                    start_time = time_pos
+                    auto_title = f"▶ [Lanjut Nonton] {latest['anime_title']} - Episode {ep_str} [Lanjut di {time_str}] ({percent}%)"
+                else:
+                    next_n = (int(ep_n) if isinstance(ep_n, float) and ep_n.is_integer() else ep_n) + 1
+                    next_str = str(int(next_n)) if isinstance(next_n, float) and next_n.is_integer() else str(next_n)
+                    target_num = next_n
+                    start_time = 0
+                    auto_title = f"▶ [Lanjut Nonton] {latest['anime_title']} - Episode {next_str} (Selesai Ep {ep_str})"
 
                 menu_items.append({
                     "action": "auto_resume",
-                    "title": f"▶ [Lanjut Nonton] {latest['anime_title']} - Episode {next_str} (Terakhir: Ep {last_str})",
+                    "title": auto_title,
                     "item": latest,
-                    "target_ep": next_num
+                    "target_ep": target_num,
+                    "start_time": start_time
                 })
 
             menu_items.extend([
@@ -1376,6 +1557,7 @@ def main():
                     "provider": item.get("provider", "otakudesu")
                 }
                 target_ep_num = menu_pick["target_ep"]
+                initial_start_pos = menu_pick["start_time"]
             elif menu_pick["action"] == "ongoing":
                 ongoing_list = get_ongoing_anime()
                 selected_anime = fzf_select(ongoing_list, prompt="Pilih Anime Ongoing: ", display_fn=lambda x: x["title"])
@@ -1383,11 +1565,13 @@ def main():
                 if not hist:
                     log_warn("Belum ada riwayat tontonan.")
                     return
-                choice = fzf_select(
-                    hist,
-                    prompt="Pilih Riwayat Anime: ",
-                    display_fn=lambda x: f"{x['anime_title']} (Terakhir: {x['last_ep_title']}) {('[' + x.get('date_str','') + ']') if x.get('date_str') else ''}"
-                )
+
+                def format_hist_entry(x):
+                    p = f" [Dijeda di {format_time(x['time_pos'])} - {x.get('percent',0)}%]" if x.get("status") == "in_progress" and x.get("time_pos", 0) > 0 else " (Selesai)"
+                    d = f" [{x.get('date_str','')}]" if x.get("date_str") else ""
+                    return f"{x['anime_title']} - {x['last_ep_title']}{p}{d}"
+
+                choice = fzf_select(hist, prompt="Pilih Riwayat Anime: ", display_fn=format_hist_entry)
                 if not choice:
                     return
                 selected_anime = {
@@ -1395,8 +1579,13 @@ def main():
                     "url": choice["anime_url"],
                     "provider": choice.get("provider", "otakudesu")
                 }
-                last_n = choice.get("last_ep_num", 0)
-                target_ep_num = (int(last_n) if isinstance(last_n, float) and last_n.is_integer() else last_n) + 1
+                ep_n = choice.get("last_ep_num", 1)
+                if choice.get("status") == "in_progress" and choice.get("time_pos", 0) > 0:
+                    target_ep_num = ep_n
+                    initial_start_pos = choice["time_pos"]
+                else:
+                    target_ep_num = (int(ep_n) if isinstance(ep_n, float) and ep_n.is_integer() else ep_n) + 1
+                    initial_start_pos = 0
             else:
                 try:
                     query = input(f"{C_BOLD}Ketik judul anime: {C_RESET}").strip()
@@ -1511,7 +1700,19 @@ def main():
 
         candidates.sort(key=score_candidate, reverse=True)
 
+        # Check start_pos for this episode
+        start_pos_for_ep = initial_start_pos
+        if start_pos_for_ep == 0:
+            hist = load_history()
+            for h in hist:
+                if h.get("anime_url") == selected_anime["url"] and h.get("last_ep_num") == ep["ep_num"]:
+                    if h.get("status") == "in_progress" and h.get("time_pos", 0) > 0:
+                        start_pos_for_ep = h["time_pos"]
+                    break
+
         played_successfully = False
+        last_playback_info = None
+
         for cand in candidates:
             s_name = cand["server"]
             s_qual = cand["quality"]
@@ -1522,30 +1723,43 @@ def main():
                 log_warn(f"Server {s_name} ({s_qual}) tidak tersedia, mencoba alternatif...")
                 continue
 
-            save_history(
-                selected_anime.get("raw_title", selected_anime["title"]),
-                selected_anime["url"],
-                ep["title"],
-                ep["ep_num"],
-                ep["url"],
-                selected_anime.get("provider", "otakudesu")
-            )
-
             full_title = f"{clean_disp_title} - {ep['title']}"
             if args.download:
+                save_history(
+                    selected_anime.get("raw_title", selected_anime["title"]),
+                    selected_anime["url"],
+                    ep["title"],
+                    ep["ep_num"],
+                    ep["url"],
+                    selected_anime.get("provider", "otakudesu"),
+                    status="completed"
+                )
                 download_video(stream_url, full_title, s_qual, referer=ref, is_hls=is_hls)
                 played_successfully = True
                 break
             else:
-                ok = play_video(stream_url, full_title, f"{s_qual} - {s_name}", referer=ref, is_hls=is_hls)
+                ok, pb_state = play_video(stream_url, full_title, f"{s_qual} - {s_name}", referer=ref, is_hls=is_hls, start_pos=start_pos_for_ep)
                 if ok:
+                    last_playback_info = pb_state
+                    save_history(
+                        selected_anime.get("raw_title", selected_anime["title"]),
+                        selected_anime["url"],
+                        ep["title"],
+                        ep["ep_num"],
+                        ep["url"],
+                        selected_anime.get("provider", "otakudesu"),
+                        status=pb_state["status"],
+                        time_pos=pb_state["time_pos"],
+                        percent=pb_state["percent"],
+                        duration=pb_state["duration"]
+                    )
                     played_successfully = True
                     break
                 else:
                     log_warn(f"Pemutaran video terputus atau gagal di {s_name}, mencoba server lain...")
 
         # If all candidates on current provider failed to play, attempt Cross-Provider Fallback!
-        if not played_successfully:
+        if not played_successfully and not args.download:
             log_warn(f"Semua server di {prov_display} gagal memutar {ep['title']}.")
             matched_alt_ep, alt_cands = REGISTRY.find_cross_provider_fallback(clean_disp_title, ep["ep_num"], selected_anime["provider"])
             if alt_cands:
@@ -1558,20 +1772,36 @@ def main():
                     stream_url, ref = cand["resolve_fn"]()
                     if stream_url:
                         full_title = f"{clean_disp_title} - {ep['title']} (Fallback)"
-                        if args.download:
-                            download_video(stream_url, full_title, s_qual, referer=ref, is_hls=is_hls)
+                        ok, pb_state = play_video(stream_url, full_title, f"{s_qual} - {s_name}", referer=ref, is_hls=is_hls, start_pos=start_pos_for_ep)
+                        if ok:
+                            last_playback_info = pb_state
+                            save_history(
+                                selected_anime.get("raw_title", selected_anime["title"]),
+                                selected_anime["url"],
+                                ep["title"],
+                                ep["ep_num"],
+                                ep["url"],
+                                selected_anime.get("provider", "otakudesu"),
+                                status=pb_state["status"],
+                                time_pos=pb_state["time_pos"],
+                                percent=pb_state["percent"],
+                                duration=pb_state["duration"]
+                            )
                             played_successfully = True
                             break
-                        else:
-                            ok = play_video(stream_url, full_title, f"{s_qual} - {s_name}", referer=ref, is_hls=is_hls)
-                            if ok:
-                                played_successfully = True
-                                break
 
         if not played_successfully:
             log_err(f"Semua server alternatif di semua penyedia gagal memuat {ep['title']}.")
 
-        # Next episode prompt
+        # Check if user closed midway (in_progress):
+        if last_playback_info and last_playback_info.get("status") == "in_progress":
+            t_str = format_time(last_playback_info['time_pos'])
+            log_info(f"Tontonan dijeda di menit {t_str} ({last_playback_info['percent']}%). Progres tersimpan.")
+            break
+        elif last_playback_info and last_playback_info.get("status") == "completed":
+            log_success(f"Selesai menonton {ep['title']}!")
+
+        # Next episode prompt (only if completed or downloaded!)
         if cur_ep_idx + 1 < len(episodes):
             next_ep = episodes[cur_ep_idx + 1]
             try:
@@ -1579,6 +1809,7 @@ def main():
                 ans = input(f"{C_CYAN}Putar episode berikutnya ({next_ep['title']})? [Y/n]: {C_RESET}").strip().lower()
                 if ans in ("", "y", "ya", "yes"):
                     cur_ep_idx += 1
+                    initial_start_pos = 0
                     continue
                 else:
                     break

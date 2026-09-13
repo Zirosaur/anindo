@@ -123,6 +123,12 @@ def test_code_integrity():
     assert callable(mod.get("save_history")), "save_history is not callable"
     assert callable(mod.get("load_history")), "load_history is not callable"
     assert callable(mod.get("check_and_self_update")), "check_and_self_update is not callable"
+
+    # Check format_time helper
+    fmt_fn = mod.get("format_time")
+    assert callable(fmt_fn), "format_time is not callable"
+    assert fmt_fn(65) == "01:05", f"Expected 01:05, got {fmt_fn(65)}"
+    assert fmt_fn(3665) == "01:01:05", f"Expected 01:01:05, got {fmt_fn(3665)}"
     print("  Code integrity & XDG watch state verified: 0 undefined globals")
 
 run_check("Code Integrity & Watch State Helpers", test_code_integrity)
