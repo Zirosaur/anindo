@@ -1,0 +1,16 @@
+{
+  "version": "1.0",
+  "otakudesu": {
+    "search_path": "/?s={query}&post_type=anime",
+    "ongoing_path": "/ongoing-anime/",
+    "catalog_path": "/anime-list/",
+    "episode_anchor": "/episode/",
+    "ajax_endpoint": "/wp-admin/admin-ajax.php"
+  },
+  "nontonanime": {
+    "search_path": "/?s={query}",
+    "ongoing_path": "/ongoing-bajzxqv/",
+    "episode_anchor": "/nonton/",
+    "anime_anchor": "/anime/"
+  }
+}

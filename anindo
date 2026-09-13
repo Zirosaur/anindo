@@ -2,7 +2,7 @@
 """
 anindo - CLI Streaming Anime Subtitle Indonesia (ani-cli alternative with Indonesian subtitles)
 Author: Google Deepmind Antigravity Pair Programmer for ziro
-Version: 1.5.0
+Version: 1.6.0
 """
 
 import sys
@@ -20,20 +20,24 @@ import threading
 import concurrent.futures
 from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from html.parser import HTMLParser
 
 try:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 except ImportError:
     AESGCM = None
 
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 CACHE_DIR = Path.home() / ".cache" / "anindo"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 HISTORY_FILE = CACHE_DIR / "history.json"
 CATALOG_CACHE_FILE = CACHE_DIR / "catalog.json"
 DOMAINS_CACHE_FILE = CACHE_DIR / "domains.json"
+RULES_CACHE_FILE = CACHE_DIR / "rules.json"
 USER_CONFIG_FILE = Path.home() / ".config" / "anindo" / "config.json"
+
 REMOTE_DOMAINS_URL = "https://raw.githubusercontent.com/Zirosaur/anindo/main/domains.json"
+REMOTE_RULES_URL = "https://raw.githubusercontent.com/Zirosaur/anindo/main/rules.json"
 
 USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
 
@@ -51,7 +55,25 @@ DEFAULT_DOMAINS = {
     ]
 }
 
+# Default scraping rules (over-the-air upgradable)
+DEFAULT_RULES = {
+    "otakudesu": {
+        "search_path": "/?s={query}&post_type=anime",
+        "ongoing_path": "/ongoing-anime/",
+        "catalog_path": "/anime-list/",
+        "episode_anchor": "/episode/",
+        "ajax_endpoint": "/wp-admin/admin-ajax.php"
+    },
+    "nontonanime": {
+        "search_path": "/?s={query}",
+        "ongoing_path": "/ongoing-bajzxqv/",
+        "episode_anchor": "/nonton/",
+        "anime_anchor": "/anime/"
+    }
+}
+
 _RESOLVED_DOMAINS = {}
+_ACTIVE_RULES = None
 
 # ANSI Colors
 C_RESET = "\033[0m"
@@ -76,6 +98,87 @@ def log_warn(msg):
 def log_err(msg):
     print(f"{C_RED}[anindo]{C_RESET} {msg}", file=sys.stderr)
 
+class DOMParser(HTMLParser):
+    """Resilient DOM Tokenizer that extracts links, meta tags, and iframes without regex fragility."""
+    def __init__(self):
+        super().__init__()
+        self.links = []
+        self.meta = {}
+        self.iframes = []
+        self.json_ld = []
+        self._cur_a = None
+        self._in_json_ld = False
+        self._json_ld_buf = ""
+
+    def handle_starttag(self, tag, attrs):
+        d = dict(attrs)
+        if tag == "a" and "href" in d:
+            self._cur_a = {"href": d["href"], "text": "", "title": d.get("title", ""), "attrs": d}
+        elif tag == "meta":
+            k = d.get("property") or d.get("name")
+            if k and "content" in d:
+                self.meta[k] = d["content"]
+        elif tag == "iframe" and "src" in d:
+            self.iframes.append(d["src"])
+        elif tag == "script" and d.get("type") == "application/ld+json":
+            self._in_json_ld = True
+            self._json_ld_buf = ""
+
+    def handle_endtag(self, tag):
+        if tag == "a" and self._cur_a:
+            self._cur_a["text"] = " ".join(self._cur_a["text"].split())
+            self.links.append(self._cur_a)
+            self._cur_a = None
+        elif tag == "script" and self._in_json_ld:
+            self._in_json_ld = False
+            if self._json_ld_buf.strip():
+                try:
+                    self.json_ld.append(json.loads(self._json_ld_buf))
+                except Exception:
+                    pass
+
+    def handle_data(self, data):
+        if self._cur_a is not None:
+            self._cur_a["text"] += " " + data.strip()
+        elif self._in_json_ld:
+            self._json_ld_buf += data
+
+def get_rules():
+    """Retrieve scraping rules with remote OTA update and local cache."""
+    global _ACTIVE_RULES
+    if _ACTIVE_RULES is not None:
+        return _ACTIVE_RULES
+
+    # Check local cache
+    if RULES_CACHE_FILE.exists():
+        try:
+            mtime = RULES_CACHE_FILE.stat().st_mtime
+            if time.time() - mtime < 43200: # 12h cache
+                with open(RULES_CACHE_FILE, "r") as f:
+                    _ACTIVE_RULES = json.load(f)
+                    return _ACTIVE_RULES
+        except Exception:
+            pass
+
+    # Try fetch remote rules from GitHub
+    try:
+        cmd = ["curl", "-s", "--max-time", "3", "-H", f"User-Agent: {USER_AGENT}", REMOTE_RULES_URL]
+        data = subprocess.check_output(cmd).decode("utf-8", "ignore")
+        rules = json.loads(data)
+        if isinstance(rules, dict) and "otakudesu" in rules:
+            _ACTIVE_RULES = rules
+            try:
+                with open(RULES_CACHE_FILE, "w") as f:
+                    json.dump(rules, f, indent=2)
+            except Exception:
+                pass
+            return _ACTIVE_RULES
+    except Exception:
+        pass
+
+    _ACTIVE_RULES = DEFAULT_RULES
+    return _ACTIVE_RULES
+
 def probe_and_resolve_domain(url, timeout=3):
     """Probe a domain, follow redirects (301/302), and return effective base domain if 200 OK."""
     cmd = [
@@ -97,14 +200,7 @@ def probe_and_resolve_domain(url, timeout=3):
     return None
 
 def get_base_url(provider, force_refresh=False):
-    """
-    Get active base URL for a provider with dynamic discovery and multi-level fallback:
-    1. Environment variable (e.g. ANINDO_OTAKUDESU_URL)
-    2. User config (~/.config/anindo/config.json)
-    3. In-memory cache
-    4. Local cache (~/.cache/anindo/domains.json, 12h TTL)
-    5. Remote GitHub domains.json or built-in DEFAULT_DOMAINS with auto-probing & redirect-following
-    """
+    """Get active base URL for a provider with dynamic discovery and multi-level fallback."""
     if not force_refresh and provider in _RESOLVED_DOMAINS:
         return _RESOLVED_DOMAINS[provider]
 
@@ -210,9 +306,11 @@ def curl_redirect(url, timeout=5):
 
 def curl_post_ajax(body_dict, referer, timeout=6):
     otakudesu_base = get_base_url("otakudesu")
+    rules = get_rules()
+    ajax_ep = rules.get("otakudesu", {}).get("ajax_endpoint", "/wp-admin/admin-ajax.php")
     body_str = "&".join(f"{k}={v}" for k, v in body_dict.items())
     cmd = [
-        "curl", "-s", "-X", "POST", f"{otakudesu_base}/wp-admin/admin-ajax.php",
+        "curl", "-s", "-X", "POST", f"{otakudesu_base}{ajax_ep}",
         "-H", f"User-Agent: {USER_AGENT}",
         "-H", f"Referer: {referer}",
         "-H", f"Origin: {otakudesu_base}",
@@ -423,40 +521,91 @@ def fzf_select(items, prompt="Pilih: ", display_fn=str):
     return None
 
 def get_ongoing_anime():
-    """Fetch latest ongoing anime releases from Otakudesu."""
+    """Fetch latest ongoing anime releases from Otakudesu using DOMParser."""
     log_info("Mengambil daftar anime on-going terbaru...")
     otakudesu_base = get_base_url("otakudesu")
-    html_page = curl_get(f"{otakudesu_base}/ongoing-anime/")
+    rules = get_rules()
+    ongoing_path = rules.get("otakudesu", {}).get("ongoing_path", "/ongoing-anime/")
+    html_page = curl_get(f"{otakudesu_base}{ongoing_path}")
+
+    parser = DOMParser()
+    parser.feed(html_page)
+
     items = []
-    for m in re.finditer(r'<div class=[\'"]thumb[\'"]><a href=[\'"]([^\'"]+)[\'"].*?<h2 class=[\'"]jdlflm[\'"]>([^<]+)</h2>', html_page, re.DOTALL):
-        url = m.group(1).strip()
-        title = m.group(2).replace("&#8211;", "-").replace("&amp;", "&").strip()
-        items.append({
-            "title": f"{title} (Ongoing) [Otakudesu]",
-            "raw_title": title,
-            "url": url,
-            "provider": "otakudesu"
-        })
+    seen = set()
+    for link in parser.links:
+        href = link["href"]
+        if "/anime/" in href and href not in seen:
+            t = link["text"] or link["title"]
+            if t and len(t) > 3 and "ongoing" not in t.lower():
+                seen.add(href)
+                clean_title = t.replace("&#8211;", "-").replace("&amp;", "&").strip()
+                items.append({
+                    "title": f"{clean_title} (Ongoing) [Otakudesu]",
+                    "raw_title": clean_title,
+                    "url": href,
+                    "provider": "otakudesu"
+                })
+
+    # Regex fallback if DOMParser found fewer items
+    if len(items) < 3:
+        for m in re.finditer(r'<div class=[\'"]thumb[\'"]><a href=[\'"]([^\'"]+)[\'"].*?<h2 class=[\'"]jdlflm[\'"]>([^<]+)</h2>', html_page, re.DOTALL):
+            url = m.group(1).strip()
+            if url not in seen:
+                seen.add(url)
+                title = m.group(2).replace("&#8211;", "-").replace("&amp;", "&").strip()
+                items.append({
+                    "title": f"{title} (Ongoing) [Otakudesu]",
+                    "raw_title": title,
+                    "url": url,
+                    "provider": "otakudesu"
+                })
+
     return items
 
 def search_otakudesu(query):
-    """Search for anime on Otakudesu."""
+    """Search for anime on Otakudesu using resilient DOM tokenization."""
     otakudesu_base = get_base_url("otakudesu")
-    url = f"{otakudesu_base}/?s={urllib.parse.quote(query)}&post_type=anime"
+    rules = get_rules()
+    search_path = rules.get("otakudesu", {}).get("search_path", "/?s={query}&post_type=anime").format(query=urllib.parse.quote(query))
+    url = f"{otakudesu_base}{search_path}"
     html_page = curl_get(url)
 
     results = []
-    matches = re.findall(r'<h2><a href="([^"]+)"[^>]*>([^<]+)</a></h2>', html_page)
-    for link, title in matches:
-        title = title.replace("&#8211;", "-").replace("&amp;", "&").strip()
-        results.append({
-            "title": f"{title} [Otakudesu]",
-            "raw_title": title,
-            "url": link,
-            "provider": "otakudesu"
-        })
+    seen = set()
 
-    # Catalog fallback if search returns few results
+    # Tier 1: DOM Tokenizer link extraction matching /anime/
+    parser = DOMParser()
+    parser.feed(html_page)
+    for l in parser.links:
+        href = l["href"]
+        if "/anime/" in href and href not in seen:
+            t = l["text"] or l["title"]
+            if t and len(t) > 3 and not any(k in t.lower() for k in ["home", "anime list", "jadwal", "ongoing"]):
+                seen.add(href)
+                clean = t.replace("&#8211;", "-").replace("&amp;", "&").strip()
+                results.append({
+                    "title": f"{clean} [Otakudesu]",
+                    "raw_title": clean,
+                    "url": href,
+                    "provider": "otakudesu"
+                })
+
+    # Tier 2: Regex Fallback
+    if not results:
+        matches = re.findall(r'<h2><a href="([^"]+)"[^>]*>([^<]+)</a></h2>', html_page)
+        for link, title in matches:
+            if link not in seen:
+                seen.add(link)
+                clean = title.replace("&#8211;", "-").replace("&amp;", "&").strip()
+                results.append({
+                    "title": f"{clean} [Otakudesu]",
+                    "raw_title": clean,
+                    "url": link,
+                    "provider": "otakudesu"
+                })
+
+    # Tier 3: Catalog fallback if search returns few results
     if len(results) < 3:
         catalog = get_catalog()
         q_lower = query.lower()
@@ -479,17 +628,28 @@ def get_catalog():
             pass
 
     otakudesu_base = get_base_url("otakudesu")
-    html_page = curl_get(f"{otakudesu_base}/anime-list/")
+    rules = get_rules()
+    catalog_path = rules.get("otakudesu", {}).get("catalog_path", "/anime-list/")
+    html_page = curl_get(f"{otakudesu_base}{catalog_path}")
+
+    parser = DOMParser()
+    parser.feed(html_page)
+
     catalog = []
-    links = re.findall(r'<a class="hodebgst"[^>]*href="([^"]+)"[^>]*>([^<]+)', html_page)
-    for link, title in links:
-        title = title.replace("&#8211;", "-").replace("&amp;", "&").strip()
-        catalog.append({
-            "title": f"{title} [Otakudesu]",
-            "raw_title": title,
-            "url": link,
-            "provider": "otakudesu"
-        })
+    seen = set()
+    for l in parser.links:
+        href = l["href"]
+        if "/anime/" in href and href not in seen:
+            t = l["text"]
+            if t and len(t) > 2:
+                seen.add(href)
+                clean = t.replace("&#8211;", "-").replace("&amp;", "&").strip()
+                catalog.append({
+                    "title": f"{clean} [Otakudesu]",
+                    "raw_title": clean,
+                    "url": href,
+                    "provider": "otakudesu"
+                })
 
     if catalog:
         try:
@@ -501,28 +661,34 @@ def get_catalog():
     return catalog
 
 def search_nontonanime(query):
-    """Search for anime on NontonAnime (great for classic/vintage 90s-2000s anime)."""
+    """Search for anime on NontonAnime using resilient DOM tokenization."""
     nonton_base = get_base_url("nontonanime")
-    url = f"{nonton_base}/?s={urllib.parse.quote(query)}"
+    rules = get_rules()
+    search_path = rules.get("nontonanime", {}).get("search_path", "/?s={query}").format(query=urllib.parse.quote(query))
+    url = f"{nonton_base}{search_path}"
     html_page = curl_get(url)
-    articles = re.findall(r'<article[^>]*>(.*?)</article>', html_page, re.DOTALL)
+
+    parser = DOMParser()
+    parser.feed(html_page)
+
     results = []
-    for a in articles:
-        link_m = re.search(r'href=[\"\']([^\"\']+/anime/[^\"\']+)[\"\']', a)
-        if not link_m:
-            continue
-        link = link_m.group(1)
-        title_m = re.search(r'<h3[^>]*class=[\"\'][^\"\']*kk-name[^\"\']*[\"\'][^>]*>(.*?)</h3>', a, re.DOTALL) or re.search(r'title=[\"\']([^\"\']+)[\"\']', a)
-        raw_title = title_m.group(1) if title_m else "Unknown"
-        clean_title = re.sub(r'<[^>]+>', '', raw_title).strip()
-        ep_m = re.search(r'class=[\"\']kk-badge kk-badge-ep[\"\'][^>]*>([^<]+)</span>', a)
-        ep_info = f" ({ep_m.group(1).strip()})" if ep_m else ""
-        results.append({
-            "title": f"{clean_title}{ep_info} [NontonAnime]",
-            "raw_title": clean_title,
-            "url": link,
-            "provider": "nontonanime"
-        })
+    seen = set()
+    anime_anchor = rules.get("nontonanime", {}).get("anime_anchor", "/anime/")
+
+    for l in parser.links:
+        href = l["href"]
+        if anime_anchor in href and href not in seen:
+            raw_title = l["text"] or l["title"] or "Unknown"
+            if len(raw_title) > 2:
+                seen.add(href)
+                clean = re.sub(r'[\r\n\t]+', ' ', raw_title).strip()
+                results.append({
+                    "title": f"{clean} [NontonAnime]",
+                    "raw_title": clean,
+                    "url": href,
+                    "provider": "nontonanime"
+                })
+
     return results
 
 def search_anime(query, provider="all"):
@@ -550,52 +716,101 @@ def search_anime(query, provider="all"):
 
     return results
 
+def validate_episodes(episodes):
+    """Data Contract Validation: ensures episode list is non-empty and well-formed."""
+    if not episodes or not isinstance(episodes, list):
+        return False
+    valid = 0
+    for ep in episodes:
+        if ep.get("url") and ep.get("title") and "ep_num" in ep:
+            valid += 1
+    return valid > 0
+
 def get_otakudesu_episodes(anime_url):
-    """Fetch Otakudesu episodes list."""
+    """Fetch Otakudesu episodes list using DOMParser with semantic anchor."""
     html_page = curl_get(anime_url)
-    raw_eps = re.findall(r'<a href="([^"]+/episode/[^"]+)"[^>]*>([^<]+)</a>', html_page)
+    rules = get_rules()
+    anchor = rules.get("otakudesu", {}).get("episode_anchor", "/episode/")
+
+    parser = DOMParser()
+    parser.feed(html_page)
+
     episodes = []
-    for link, title in raw_eps:
-        clean_title = title.replace("&#8211;", "-").replace("&amp;", "&").replace("Subtitle Indonesia", "").strip()
-        num_m = re.search(r'Episode\s*(\d+(?:\.\d+)?)', clean_title, re.IGNORECASE)
-        ep_num = float(num_m.group(1)) if num_m else 0
-        episodes.append({
-            "title": clean_title,
-            "url": link,
-            "ep_num": ep_num,
-            "provider": "otakudesu"
-        })
+    seen = set()
+    for l in parser.links:
+        href = l["href"]
+        if anchor in href and href not in seen:
+            seen.add(href)
+            text = l["text"] or l["title"]
+            clean_title = text.replace("&#8211;", "-").replace("&amp;", "&").replace("Subtitle Indonesia", "").strip()
+            num_m = re.search(r'Episode\s*(\d+(?:\.\d+)?)', clean_title, re.IGNORECASE)
+            ep_num = float(num_m.group(1)) if num_m else 0
+            episodes.append({
+                "title": clean_title,
+                "url": href,
+                "ep_num": ep_num,
+                "provider": "otakudesu"
+            })
+
     episodes.sort(key=lambda x: x["ep_num"] if x["ep_num"] > 0 else 9999)
     return episodes
 
 def get_nontonanime_episodes(anime_url):
-    """Fetch NontonAnime episodes list."""
+    """Fetch NontonAnime episodes list using DOMParser with semantic anchor."""
     html_page = curl_get(anime_url)
-    matches = re.findall(r'<a\s+[^>]*href=[\"\']([^\"\']+/nonton/[^\"\']+)[\"\'][^>]*>(.*?)</a>', html_page, re.DOTALL)
+    rules = get_rules()
+    anchor = rules.get("nontonanime", {}).get("episode_anchor", "/nonton/")
+
+    parser = DOMParser()
+    parser.feed(html_page)
+
     episodes = {}
-    for href, inner in matches:
-        m = re.search(r'episode-(\d+(?:\.\d+)?)', href)
-        if m:
-            ep_num = float(m.group(1))
-            if ep_num not in episodes:
-                clean_title = f"Episode {int(ep_num) if ep_num.is_integer() else ep_num}"
-                episodes[ep_num] = {
-                    "title": clean_title,
-                    "url": href,
-                    "ep_num": ep_num,
-                    "provider": "nontonanime"
-                }
+    for l in parser.links:
+        href = l["href"]
+        if anchor in href:
+            m = re.search(r'episode-(\d+(?:\.\d+)?)', href)
+            if m:
+                ep_num = float(m.group(1))
+                if ep_num not in episodes:
+                    clean_title = f"Episode {int(ep_num) if ep_num.is_integer() else ep_num}"
+                    episodes[ep_num] = {
+                        "title": clean_title,
+                        "url": href,
+                        "ep_num": ep_num,
+                        "provider": "nontonanime"
+                    }
+
     sorted_eps = [episodes[k] for k in sorted(episodes.keys())]
     return sorted_eps
 
 def get_anime_details(anime_item):
-    """Fetch anime episodes based on provider."""
+    """Fetch anime episodes with data contract validation and automatic provider failover."""
     log_info("Mengambil daftar episode...")
     provider = anime_item.get("provider")
     url = anime_item.get("url", "")
+    
     if provider == "nontonanime" or "nontonanime" in url:
-        return get_nontonanime_episodes(url)
-    return get_otakudesu_episodes(url)
+        eps = get_nontonanime_episodes(url)
+    else:
+        eps = get_otakudesu_episodes(url)
+
+    # Contract validation: if parsing failed, attempt self-healing search failover
+    if not validate_episodes(eps):
+        log_warn("Daftar episode tidak ditemukan pada penyedia saat ini. Mencoba failover...")
+        alt_provider = "nontonanime" if provider == "otakudesu" else "otakudesu"
+        raw_title = anime_item.get("raw_title", "")
+        if raw_title:
+            alt_results = search_anime(raw_title, provider=alt_provider)
+            if alt_results:
+                log_info(f"Ditemukan alternatif di {alt_provider.title()}: {alt_results[0]['title']}")
+                anime_item["url"] = alt_results[0]["url"]
+                anime_item["provider"] = alt_provider
+                if alt_provider == "nontonanime":
+                    eps = get_nontonanime_episodes(anime_item["url"])
+                else:
+                    eps = get_otakudesu_episodes(anime_item["url"])
+
+    return eps
 
 def extract_otakudesu_candidates(ep_url):
     """Extract stream candidate sources for Otakudesu."""
@@ -668,8 +883,10 @@ def extract_nontonanime_candidates(ep_url):
     html_page = curl_get(ep_url)
     candidates = []
 
-    iframes = re.findall(r'<iframe[^>]+src=[\"\']([^\"\']+)[\"\']', html_page)
-    for ifr in iframes:
+    parser = DOMParser()
+    parser.feed(html_page)
+
+    for ifr in parser.iframes:
         if "putarin" in ifr or "puterin" in ifr:
             domain = urllib.parse.urlparse(ifr).netloc
             candidates.append({

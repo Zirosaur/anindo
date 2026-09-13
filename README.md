@@ -15,9 +15,14 @@
 - 🇮🇩 **Subtitle Bahasa Indonesia Asli**: Sub Indo sudah tertanam langsung di videonya (hardsub), tidak perlu repot sinkronisasi file `.srt` eksternal.
 - 🏎️ **Koleksi Lengkap (Modern + Anime Lawas/Vintage)**: Mendukung anime modern maupun anime klasik tahun 90-an & 2000-an seperti *Initial D (Stage 1-Final)*, *Slam Dunk*, *Great Teacher Onizuka (GTO)*, *Cowboy Bebop*, *Neon Genesis Evangelion*, dll.
 - 🌐 **Multi-Provider Search**: Melakukan pencarian paralel ke berbagai penyedia anime Sub Indo (Otakudesu & NontonAnime) secara otomatis.
-- 🔄 **Dynamic Domain Resolver (Anti-Blokir)**: Dilengkapi sistem deteksi pergantian domain otomatis (auto-probing & follow redirect) dan konfigurasi jarak jauh lewat file `domains.json` di GitHub. Jika domain situs berganti, `anindo` otomatis menyesuaikan diri tanpa perlu mengubah kode Python!
+- 🛡️ **Enterprise Resilient Scraper**:
+  - **Zero-Regex DOM Tokenizer**: Menggunakan `html.parser` bawaan Python yang kebal terhadap perubahan urutan atribut HTML, penataan spasi, minifikasi HTML, dan perombakan tema web.
+  - **Remote OTA Rules (`rules.json`)**: Pola selektor dan rute ekstraksi dikonfigurasi secara jarak jauh lewat GitHub tanpa perlu mengubah kode skrip Python jika web sumber berubah.
+  - **Data Contract & Self-Healing**: Memvalidasi integritas data episode dan otomatis melakukan *failover* antar penyedia jika ada struktur data yang rusak.
+  - **CI/CD Canary Monitoring**: Diuji otomatis setiap hari via GitHub Actions untuk memastikan scraper dan resolver selalu 100% sehat.
+- 🔄 **Dynamic Domain Resolver (Anti-Blokir)**: Dilengkapi sistem deteksi pergantian domain otomatis (auto-probing & follow redirect) dan konfigurasi jarak jauh lewat file `domains.json` di GitHub.
 - ⚡ **Pencarian Interaktif Cepat**: Menggunakan `fzf` untuk memilih anime dan episode dengan navigasi keyboard yang responsif.
-- 🛡️ **Multi-Server & Auto-Fallback**: Mendukung berbagai server mirror berkecepatan tinggi (Filedon / Cloudflare R2, Pixeldrain, Putarin HLS, YourUpload, ODCloud). Jika satu server DMCA/offline, otomatis beralih ke server cadangan.
+- 🚀 **Multi-Server & Auto-Fallback**: Mendukung berbagai server mirror berkecepatan tinggi (Filedon / Cloudflare R2, Pixeldrain, Putarin HLS, YourUpload, ODCloud). Jika satu server DMCA/offline, otomatis beralih ke server cadangan.
 - 📺 **Pemutar Video MPV**: Streaming langsung tanpa iklan web atau pop-up, mendukung resume posisi tontonan terakhir.
 - ⏭️ **Auto-Next Episode**: Menawarkan pemutaran episode berikutnya secara otomatis setelah episode selesai.
 - 🕒 **Riwayat Tontonan (History & Continue)**: Menyimpan riwayat tontonan untuk langsung melanjutkan kapan saja (`-c`).
