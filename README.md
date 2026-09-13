@@ -22,13 +22,20 @@
   - **Data Contract & Self-Healing**: Memvalidasi integritas data episode dan otomatis melakukan *failover* antar penyedia jika ada struktur data yang rusak.
   - **CI/CD Canary Monitoring**: Diuji otomatis setiap hari via GitHub Actions untuk memastikan scraper dan resolver selalu 100% sehat.
 - 🔄 **Dynamic Domain Resolver (Anti-Blokir)**: Dilengkapi sistem deteksi pergantian domain otomatis (auto-probing & follow redirect) dan konfigurasi jarak jauh lewat file `domains.json` di GitHub.
-- ⚡ **Pencarian Interaktif Cepat**: Menggunakan `fzf` untuk memilih anime dan episode dengan navigasi keyboard yang responsif.
-- 🚀 **Multi-Server & Auto-Fallback**: Mendukung berbagai server mirror berkecepatan tinggi (Filedon / Cloudflare R2, Pixeldrain, Putarin HLS, YourUpload, ODCloud). Jika satu server DMCA/offline, otomatis beralih ke server cadangan.
+- ⚡ **Pencarian Interaktif & Smart Auto-Resume**:
+  - Menggunakan `fzf` untuk navigasi cepat dan mulus.
+  - **Auto-Resume Otomatis**: Saat membuka menu utama, opsi paling atas langsung menawarkan episode berikutnya (`▶ [Lanjut Nonton] Judul - Episode X+1`)! Cukup tekan `Enter`.
+- 🚀 **Akselerasi Download Multi-Connection (`aria2c` / `yt-dlp`)**: Mengunduh video dengan akselerasi hingga 16 koneksi paralel (`-d`).
+- 🐧 **Integrasi Desktop Linux Native**:
+  - **Socket IPC MPV (`/tmp/anindo-mpv.sock`)**: Langsung terbaca oleh widget Waybar, Caelestia, dan `playerctl`/MPRIS.
+  - **Window Title**: `--title="anindo: ${TITLE}"` ramah terhadap *window rules* tiling window manager (Hyprland / Sway).
+  - **Desktop Notification**: Notifikasi popup via `notify-send` saat stream mulai diputar atau diunduh.
+- 🎯 **Pilihan Kualitas Fleksibel (`-q`)**: Mendukung format fleksibel seperti `-q 720p`, `-q 1080`, `-q best`, lengkap dengan *smart proximity fallback*.
+- 🔄 **Pembaruan Mandiri Cepat (`anindo -u`)**: Cek dan perbarui binari langsung ke rilis GitHub terbaru tanpa perlu curl script manual ulang.
 - 📺 **Pemutar Video MPV**: Streaming langsung tanpa iklan web atau pop-up, mendukung resume posisi tontonan terakhir.
 - ⏭️ **Auto-Next Episode**: Menawarkan pemutaran episode berikutnya secara otomatis setelah episode selesai.
-- 🕒 **Riwayat Tontonan (History & Continue)**: Menyimpan riwayat tontonan untuk langsung melanjutkan kapan saja (`-c`).
+- 🕒 **Watch State XDG**: Riwayat tontonan disimpan sesuai standar `$XDG_STATE_HOME/anindo/history.json`.
 - 🔥 **Anime On-Going**: Akses cepat ke daftar anime yang sedang rilis musim ini (`-o`).
-- 📥 **Opsi Download**: Bisa mengunduh video ke penyimpanan lokal (`-d`).
 
 ---
 
@@ -41,20 +48,22 @@ Pastikan peralatan berikut sudah terpasang di sistemmu:
 - **fzf** (menu interaktif terminal)
 - **curl** (pengambil data web)
 - **python-cryptography** (untuk dekripsi stream HLS anime klasik)
+- **aria2c** *(opsional)*: Untuk akselerasi unduhan hingga 16x lebih cepat
+- **yt-dlp** *(opsional)*: Untuk penanganan unduhan HLS m3u8
 
 ### Cara Install Dependensi:
 
 * **Arch Linux / Manjaro:**
   ```bash
-  sudo pacman -S python python-cryptography mpv fzf curl yt-dlp
+  sudo pacman -S python python-cryptography mpv fzf curl yt-dlp aria2
   ```
 * **Ubuntu / Debian / Linux Mint:**
   ```bash
-  sudo apt update && sudo apt install python3 python3-cryptography mpv fzf curl yt-dlp
+  sudo apt update && sudo apt install python3 python3-cryptography mpv fzf curl yt-dlp aria2
   ```
 * **Fedora:**
   ```bash
-  sudo dnf install python3 python3-cryptography mpv fzf curl yt-dlp
+  sudo dnf install python3 python3-cryptography mpv fzf curl yt-dlp aria2
   ```
 
 ---
@@ -87,11 +96,12 @@ ln -sf ~/.local/bin/anindo ~/.local/bin/ani-cli-id
 
 ## 📖 Cara Penggunaan
 
-### 1. Menu Utama Interaktif
+### 1. Menu Utama Interaktif (Termasuk Smart Auto-Resume)
 Jalankan tanpa argumen untuk menampilkan menu pilihan:
 ```bash
 anindo
 ```
+Jika sebelumnya kamu pernah menonton, opsi paling atas langsung mengarahkan ke **episode berikutnya**!
 
 ### 2. Cari Anime (Modern atau Klasik)
 ```bash
@@ -118,7 +128,7 @@ anindo -o
 ```bash
 anindo -c
 ```
-Atau lihat daftar riwayat yang pernah ditonton:
+Atau lihat daftar riwayat lengkap yang pernah ditonton:
 ```bash
 anindo --history
 ```
@@ -131,26 +141,28 @@ anindo -p otakudesu "frieren"
 ```
 
 ### 7. Memilih Kualitas Video (Resolusi)
-Kualitas default adalah yang tertinggi (`best`). Kamu bisa menentukan resolusi pilihan:
+Kualitas default adalah yang tertinggi (`best`). Mendukung penulisan dengan atau tanpa `p`:
 ```bash
-anindo -q 720 "frieren"
+anindo -q 720p "frieren"
 anindo -q 480 "naruto"
 ```
-Pilihan kualitas: `360`, `480`, `720`, `1080`, `best`.
+Pilihan kualitas: `360p`, `480p`, `720p`, `1080p`, `best`.
 
-### 8. Mengunduh Video (Download)
+### 8. Mengunduh Video (Download dengan Akselerasi aria2c)
 ```bash
 anindo -d -e 1 "initial d"
 ```
 
-### 9. Periksa & Perbarui Domain Sumber
+### 9. Pembaruan Mandiri (Self-Update)
+Periksa dan perbarui binari `anindo` ke versi rilis GitHub terbaru:
+```bash
+anindo -u
+```
+
+### 10. Periksa & Perbarui Domain Sumber
 Jika salah satu situs berganti domain, jalankan:
 ```bash
 anindo --update-domains
-```
-Atau atur domain manual melalui environment variable atau file `~/.config/anindo/config.json`:
-```bash
-ANINDO_OTAKUDESU_URL="https://otakudesu.cloud" anindo "one piece"
 ```
 
 ---
@@ -158,8 +170,8 @@ ANINDO_OTAKUDESU_URL="https://otakudesu.cloud" anindo "one piece"
 ## 🛠️ Opsi Perintah Lengkap
 
 ```text
-usage: anindo [-h] [-e EPISODE] [-q {360,480,720,1080,best}]
-              [-p {all,otakudesu,nontonanime}] [-o] [-c] [-d] [--history]
+usage: anindo [-h] [-e EPISODE] [-q {360,360p,480,480p,720,720p,1080,1080p,best}]
+              [-p {all,otakudesu,nontonanime}] [-o] [-c] [-d] [--history] [-u]
               [--update-domains] [-V] [query]
 
 positional arguments:
@@ -168,12 +180,13 @@ positional arguments:
 options:
   -h, --help            Tampilkan bantuan dan keluar
   -e, --episode EPISODE Nomor episode langsung (misal: -e 10)
-  -q, --quality         Kualitas video pilihan (default: best)
-  -p, --provider        Pilih sumber anime: all, otakudesu, nontonanime (default: all)
+  -q, --quality         Kualitas video pilihan (360p, 480p, 720p, 1080p, best)
+  -p, --provider        Pilih penyedia anime: all, otakudesu, nontonanime
   -o, --ongoing         Pilih dari daftar anime on-going terbaru
-  -c, --continue-watch  Lanjutkan anime dari riwayat terakhir
-  -d, --download        Unduh video ke lokal alih-alih memutar
+  -c, --continue-watch  Lanjutkan anime dari riwayat terakhir (otomatis episode berikutnya)
+  -d, --download        Unduh video ke lokal alih-alih memutar (didukung aria2c/yt-dlp)
   --history             Tampilkan riwayat anime yang pernah ditonton
+  -u, --update          Periksa dan perbarui anindo ke versi rilis GitHub terbaru
   --update-domains      Segarkan dan periksa domain aktif dari GitHub / resolver
   -V, --version         Tampilkan versi program
 ```

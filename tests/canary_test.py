@@ -116,9 +116,16 @@ def test_code_integrity():
     assert callable(fzf_fn), "fzf_select function is missing or not callable"
     assert fzf_fn([]) is None, "fzf_select([]) must return None"
     assert fzf_fn(["sample"]) == "sample", "fzf_select(['sample']) must return 'sample'"
-    print("  Code integrity & fzf_select verified: 0 undefined globals")
 
-run_check("Code Integrity & UI Helper (fzf_select)", test_code_integrity)
+    # Check XDG State directory and History helpers
+    assert mod.get("STATE_DIR") is not None, "STATE_DIR is not defined"
+    assert mod.get("HISTORY_FILE") is not None, "HISTORY_FILE is not defined"
+    assert callable(mod.get("save_history")), "save_history is not callable"
+    assert callable(mod.get("load_history")), "load_history is not callable"
+    assert callable(mod.get("check_and_self_update")), "check_and_self_update is not callable"
+    print("  Code integrity & XDG watch state verified: 0 undefined globals")
+
+run_check("Code Integrity & Watch State Helpers", test_code_integrity)
 
 # Summary
 print("\n" + "=" * 60)
